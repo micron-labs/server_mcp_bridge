@@ -1,0 +1,25 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	dh_auto_configure -- \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DENABLE_SSL=ON \
+		-DENABLE_MYSQL=OFF \
+		-DENABLE_POSTGRES=OFF \
+		-DBUILD_TESTS=OFF
+
+override_dh_auto_install:
+	# Install binary
+	install -D -m 755 obj-*/server_mcp_bridge debian/server-mcp-bridge/usr/bin/server-mcp-bridge
+
+	# Install default config
+	install -D -m 644 .env.example debian/server-mcp-bridge/etc/server-mcp-bridge/env.example
+
+	# Create state directories
+	install -d -m 750 debian/server-mcp-bridge/var/lib/server-mcp-bridge
+	install -d -m 750 debian/server-mcp-bridge/var/log/server-mcp-bridge

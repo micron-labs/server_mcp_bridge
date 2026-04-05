@@ -1,0 +1,56 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Create service user if it doesn't exist
+        if ! getent passwd mcp-bridge >/dev/null 2>&1; then
+            adduser --system --group --no-create-home \
+                --home /var/lib/server-mcp-bridge \
+                mcp-bridge
+        fi
+
+        # Set ownership
+        chown -R mcp-bridge:mcp-bridge /var/lib/server-mcp-bridge
+        chown -R mcp-bridge:mcp-bridge /var/log/server-mcp-bridge
+
+        # Create env config from example if it doesn't exist
+        if [ ! -f /etc/server-mcp-bridge/env ]; then
+            cp /etc/server-mcp-bridge/env.example /etc/server-mcp-bridge/env
+            # Generate a random API key
+            if command -v openssl >/dev/null 2>&1; then
+                API_KEY=$(openssl rand -hex 32)
+                sed -i "s/^API_KEY=.*/API_KEY=$API_KEY/" /etc/server-mcp-bridge/env
+            fi
+            # Set paths for system install
+            sed -i "s|^LOG_FILE=.*|LOG_FILE=/var/log/server-mcp-bridge/server.log|" /etc/server-mcp-bridge/env
+            chmod 600 /etc/server-mcp-bridge/env
+            chown mcp-bridge:mcp-bridge /etc/server-mcp-bridge/env
+            echo ""
+            echo "=========================================="
+            echo " Server MCP Bridge installed!"
+            echo "=========================================="
+            echo ""
+            echo " Config: /etc/server-mcp-bridge/env"
+            echo " API Key was auto-generated."
+            echo ""
+            echo " To view your API key:"
+            echo "   sudo grep API_KEY /etc/server-mcp-bridge/env"
+            echo ""
+            echo " To start the service:"
+            echo "   sudo systemctl start server-mcp-bridge"
+            echo "   sudo systemctl enable server-mcp-bridge"
+            echo ""
+            echo "=========================================="
+        fi
+
+        # Reload systemd
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

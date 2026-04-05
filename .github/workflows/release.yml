@@ -1,0 +1,203 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-deb:
+    name: Build .deb (${{ matrix.distro }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - distro: ubuntu-22.04
+            image: ubuntu:22.04
+          - distro: ubuntu-24.04
+            image: ubuntu:24.04
+          - distro: debian-12
+            image: debian:12
+
+    container:
+      image: ${{ matrix.image }}
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            build-essential cmake pkg-config \
+            libssl-dev \
+            debhelper devscripts \
+            git
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set version from tag
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          # Update changelog version
+          sed -i "1s/(.*)/($VERSION-1)/" debian/changelog
+
+      - name: Build .deb package
+        run: |
+          dpkg-buildpackage -us -uc -b
+
+      - name: Rename and collect artifact
+        run: |
+          mkdir -p dist
+          cp ../*.deb dist/
+          # Rename to include distro
+          for f in dist/*.deb; do
+            newname=$(echo "$f" | sed "s/_amd64/_${{ matrix.distro }}_amd64/")
+            mv "$f" "$newname"
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.distro }}
+          path: dist/*.deb
+
+  build-binary:
+    name: Build static binary (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: server-mcp-bridge-linux-amd64
+          - os: windows-latest
+            artifact: server-mcp-bridge-windows-amd64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libssl-dev pkg-config
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_SSL=ON -DENABLE_MYSQL=OFF -DENABLE_POSTGRES=OFF
+          cmake --build build
+          strip build/server_mcp_bridge
+          mkdir dist
+          cp build/server_mcp_bridge dist/${{ matrix.artifact }}
+          cp .env.example dist/
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_SSL=OFF -DENABLE_MYSQL=OFF -DENABLE_POSTGRES=OFF
+          cmake --build build --config Release
+          mkdir dist
+          copy build\Release\server_mcp_bridge.exe dist\${{ matrix.artifact }}.exe
+          copy .env.example dist\
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.artifact }}
+          path: dist/
+
+  release:
+    name: Create GitHub Release
+    needs: [build-deb, build-binary]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release files
+        run: |
+          mkdir release
+          find artifacts -type f \( -name "*.deb" -o -name "server-mcp-bridge-*" -o -name "*.exe" \) -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release/*
+          body: |
+            ## Installation
+
+            ### Debian/Ubuntu (.deb)
+
+            Download the `.deb` for your distro and install:
+
+            ```bash
+            sudo apt install ./server-mcp-bridge_*_amd64.deb
+            ```
+
+            The service is installed at `/usr/bin/server-mcp-bridge` with config at `/etc/server-mcp-bridge/env`.
+            An API key is auto-generated on first install.
+
+            ```bash
+            # View your API key
+            sudo grep API_KEY /etc/server-mcp-bridge/env
+
+            # Start the service
+            sudo systemctl start server-mcp-bridge
+            sudo systemctl enable server-mcp-bridge
+            ```
+
+            ### Linux (standalone binary)
+
+            ```bash
+            chmod +x server-mcp-bridge-linux-amd64
+            cp .env.example .env
+            # Edit .env and set API_KEY
+            ./server-mcp-bridge-linux-amd64
+            ```
+
+            ### Windows
+
+            ```powershell
+            copy .env.example .env
+            # Edit .env and set API_KEY
+            .\server-mcp-bridge-windows-amd64.exe
+            ```
+
+  publish-apt:
+    name: Publish to apt repository
+    needs: [release]
+    runs-on: ubuntu-latest
+    if: ${{ vars.PACKAGECLOUD_REPO != '' }}
+
+    steps:
+      - name: Download deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          path: debs
+
+      - name: Install packagecloud CLI
+        run: gem install package_cloud
+
+      - name: Push to packagecloud
+        env:
+          PACKAGECLOUD_TOKEN: ${{ secrets.PACKAGECLOUD_TOKEN }}
+          PACKAGECLOUD_REPO: ${{ vars.PACKAGECLOUD_REPO }}
+        run: |
+          find debs -name "*.deb" | while read deb; do
+            filename=$(basename "$deb")
+            if echo "$filename" | grep -q "ubuntu-22.04"; then
+              package_cloud push "$PACKAGECLOUD_REPO/ubuntu/jammy" "$deb"
+            elif echo "$filename" | grep -q "ubuntu-24.04"; then
+              package_cloud push "$PACKAGECLOUD_REPO/ubuntu/noble" "$deb"
+            elif echo "$filename" | grep -q "debian-12"; then
+              package_cloud push "$PACKAGECLOUD_REPO/debian/bookworm" "$deb"
+            fi
+          done

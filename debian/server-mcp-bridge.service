@@ -1,0 +1,32 @@
+[Unit]
+Description=Server MCP Bridge
+Documentation=https://github.com/TheParadox20/server-mcp-bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mcp-bridge
+Group=mcp-bridge
+WorkingDirectory=/var/lib/server-mcp-bridge
+ExecStart=/usr/bin/server-mcp-bridge --env /etc/server-mcp-bridge/env
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/server-mcp-bridge /var/log/server-mcp-bridge
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=server-mcp-bridge
+
+[Install]
+WantedBy=multi-user.target

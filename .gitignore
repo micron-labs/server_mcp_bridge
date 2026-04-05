@@ -1,0 +1,22 @@
+build/
+.env
+context.json
+logs/
+*.log
+/tmp/
+*.o
+*.exe
+compile_commands.json
+.cache/
+.vscode/
+.idea/
+CMakeUserPresets.json
+
+# dpkg-buildpackage output
+obj-*/
+debian/.debhelper/
+debian/server-mcp-bridge/
+debian/tmp/
+debian/files
+debian/*.substvars
+debian/*.debhelper.log

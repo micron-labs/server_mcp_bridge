@@ -1,0 +1,11 @@
+server-mcp-bridge (1.0.0-1) unstable; urgency=medium
+
+  * Initial release.
+  * 62 tools across 8 modules: files, database, networking, firewall,
+    web server, processes, command execution, sandboxed code execution.
+  * Cross-platform support (Linux and Windows).
+  * Bearer token authentication with constant-time comparison.
+  * Per-IP rate limiting, rotating log files, context tracking.
+  * Sandbox isolation via bubblewrap, namespaces, or ulimit fallback.
+
+ -- TheParadox20 <noreply@example.com>  Sat, 05 Apr 2026 15:00:00 +0000

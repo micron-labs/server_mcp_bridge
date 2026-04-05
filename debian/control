@@ -1,0 +1,20 @@
+Source: server-mcp-bridge
+Section: admin
+Priority: optional
+Maintainer: TheParadox20 <noreply@example.com>
+Build-Depends: debhelper-compat (= 13), cmake (>= 3.20), g++ (>= 9), libssl-dev, pkg-config
+Standards-Version: 4.6.2
+Homepage: https://github.com/TheParadox20/server-mcp-bridge
+
+Package: server-mcp-bridge
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: nginx | apache2, mysql-client | mariadb-client | postgresql-client, bubblewrap, certbot, python3, nodejs
+Description: Server management API bridge for MCP servers and AI agents
+ A lightweight C++ HTTP API bridge that exposes server management
+ functionality to external systems such as MCP servers or AI agents.
+ Designed for VPS and self-hosted servers.
+ .
+ Provides 62 tools for file management, database operations, networking,
+ web server management (Nginx/Apache), command execution, and sandboxed
+ code execution through a secure HTTP interface.

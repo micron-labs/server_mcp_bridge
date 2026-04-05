@@ -1,0 +1,31 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    purge)
+        # Remove config, logs, and state
+        rm -rf /etc/server-mcp-bridge
+        rm -rf /var/lib/server-mcp-bridge
+        rm -rf /var/log/server-mcp-bridge
+
+        # Remove service user
+        if getent passwd mcp-bridge >/dev/null 2>&1; then
+            deluser --system mcp-bridge || true
+        fi
+        if getent group mcp-bridge >/dev/null 2>&1; then
+            delgroup --system mcp-bridge || true
+        fi
+        ;;
+
+    remove)
+        # Stop service if running
+        if [ -d /run/systemd/system ]; then
+            systemctl stop server-mcp-bridge || true
+            systemctl disable server-mcp-bridge || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
