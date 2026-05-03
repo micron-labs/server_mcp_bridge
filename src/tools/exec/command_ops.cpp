@@ -25,7 +25,7 @@ void register_exec_tools() {
     reg.register_tool("run_command", {
         "", "Execute a shell command and return output",
         {"command"}, {"cwd", "timeout", "env"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string cmd = args["command"];
             std::string cwd = args.value("cwd", "");
             int timeout = args.value("timeout", 60);
@@ -51,7 +51,7 @@ void register_exec_tools() {
     reg.register_tool("run_background", {
         "", "Start a command as a background process",
         {"command"}, {"cwd", "env", "name"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string cmd = args["command"];
             std::string cwd = args.value("cwd", "");
             std::string name = args.value("name", cmd.substr(0, 30));
@@ -76,7 +76,7 @@ void register_exec_tools() {
     reg.register_tool("list_background", {
         "", "List managed background processes",
         {}, {},
-        [](const json&) -> json {
+        [](const RequestContext&, const json&) -> json {
             std::lock_guard<std::mutex> lock(bg_mutex);
             json result = json::array();
             for (const auto& [pid, proc] : bg_procs) {
@@ -93,7 +93,7 @@ void register_exec_tools() {
     reg.register_tool("kill_background", {
         "", "Kill a managed background process",
         {"pid"}, {"signal"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             int pid = args["pid"];
             int sig = args.value("signal", 15);
             bool ok = kill_process_by_pid(pid, sig);
@@ -110,7 +110,7 @@ void register_exec_tools() {
     reg.register_tool("get_output", {
         "", "Get stdout/stderr of a background process",
         {"pid"}, {"lines"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             int pid = args["pid"];
             int lines = args.value("lines", 100);
 

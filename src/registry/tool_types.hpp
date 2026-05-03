@@ -1,11 +1,12 @@
 #pragma once
+#include "core/request_context.hpp"
 #include <json.hpp>
 #include <string>
 #include <vector>
 #include <functional>
 
 using json = nlohmann::json;
-using ToolHandler = std::function<json(const json& args)>;
+using ToolHandler = std::function<json(const RequestContext&, const json& args)>;
 
 struct ToolDef {
     std::string name;

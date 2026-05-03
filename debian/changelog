@@ -1,3 +1,20 @@
+mcp-bridge (2.0.0~rc1-1) unstable; urgency=medium
+
+  * Rename: server-mcp-bridge -> mcp-bridge (Debian package), binary
+    /usr/bin/server-mcp-bridge -> /usr/bin/mcp_bridge. Config moves
+    from /etc/server-mcp-bridge/ to /etc/mcp_bridge/, state to
+    /var/lib/mcp_bridge/, logs to /var/log/mcp_bridge/.
+  * Daemon now runs as system user 'mcp' (formerly 'mcp-bridge').
+  * No behavioural change in this release; the rename is the entire
+    delta. Clients continue to use HTTP+JSON with the auto-generated
+    bearer token. Subsequent 2.x releases will introduce native MCP
+    (JSON-RPC 2.0) transport, multi-user auth, and a setuid helper
+    for sudoers grant management.
+  * Note: existing 1.x installations have no in-place upgrade path;
+    run apt purge server-mcp-bridge before installing this package.
+
+ -- TheParadox20 <noreply@example.com>  Sun, 03 May 2026 10:00:00 +0000
+
 server-mcp-bridge (1.0.0-1) unstable; urgency=medium
 
   * Initial release.

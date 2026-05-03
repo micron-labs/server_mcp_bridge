@@ -1,4 +1,4 @@
-# Server MCP Bridge
+# MCP Bridge
 
 A lightweight C++ API bridge that exposes server management functionality to external systems such as MCP servers or AI agents. Designed for VPS and self-hosted servers (no cPanel required).
 
@@ -10,8 +10,10 @@ Provides programmatic management of files, databases, networking, web servers, p
 
 The system runs as a single compiled binary on your server and provides:
 
-- Token-based authentication
-- Tool-based execution model (62 tools across 8 modules)
+- Native MCP / JSON-RPC 2.0 transport with `Mcp-Session-Id` session binding
+- Per-OS-user multi-tenancy (each end user gets a `mcp_user_<shortid>` POSIX account)
+- Setuid helper for time-limited sudoers grants (admin-only)
+- Tool-based execution model (64 tools across 9 modules)
 - Context tracking
 - Logging (console + rotating file)
 - Rate limiting
@@ -22,7 +24,7 @@ Client (MCP server, AI agent, automation)
   |
   |  HTTP POST with JSON
   v
-Server MCP Bridge (this binary)
+MCP Bridge (this binary)
   |
   |  Executes directly on the host OS
   v
@@ -34,50 +36,58 @@ Server resources (files, databases, services, processes)
 ## Directory Structure
 
 ```
-server_mcp_bridge/
-  CMakeLists.txt          # Build system
-  .env                    # Configuration (create from .env.example)
-  .env.example            # Configuration template
-  context.json            # Auto-created on first request
-  logs/
-    server.log            # Auto-created
+mcp_bridge/
+  CMakeLists.txt              # Build system (mcp_bridge + mcp_bridge-priv)
+  etc/mcp_bridge/
+    mcp.json.template         # Postinst-materialized config template
+  installer/
+    install.sh                # `curl | bash` installer
+    release.md                # Per-release publishing checklist
+  debian/                     # Debian packaging (mcp-bridge.service, postinst, …)
 
-  vendor/                 # Header-only dependencies
-    httplib.h             # cpp-httplib (HTTP server)
-    json.hpp              # nlohmann/json
-    spdlog/               # spdlog (logging)
+  vendor/                     # Header-only dependencies
+    httplib.h                 # cpp-httplib (HTTP + SSE)
+    json.hpp                  # nlohmann/json
+    spdlog/                   # spdlog (logging)
 
   src/
-    main.cpp              # Entry point
+    main.cpp                  # argv[1] dispatch: daemon | auth …
     core/
-      server.cpp/hpp      # HTTP server, routing, request dispatch
-      config.cpp/hpp      # .env parser
-      auth.cpp/hpp        # Bearer token verification
-      rate_limiter.cpp/hpp # Per-IP rate limiting
-      context.cpp/hpp     # context.json state tracking
-      logger.cpp/hpp      # spdlog initialization
-      response.hpp        # JSON response helpers
+      server.cpp/hpp          # MCP transport — POST JSON-RPC, GET SSE
+      jsonrpc.cpp/hpp         # JSON-RPC 2.0 envelope
+      mcp_router.cpp/hpp      # initialize / tools/list / tools/call …
+      session.cpp/hpp         # Mcp-Session-Id issue/validate
+      auth.cpp/hpp            # Bearer→user resolution (UserStore + admin fallback)
+      user_store.cpp/hpp      # /var/lib/mcp_bridge/users/*.json index
+      grants.cpp/hpp          # Sudoers drop-in lifecycle
+      grant_template.cpp/hpp  # Template render + spec-shape check
+      crypto.cpp/hpp          # SHA-256, hex, constant-time compare
+      shortid.cpp/hpp         # 8-char base32 IDs + UUID-v4
+      config.cpp/hpp          # JSON config parser
+      rate_limiter.cpp/hpp    # Per-user rate limit + GC
+      context.cpp/hpp         # Cross-tool persistent K/V store
+      request_context.hpp     # Per-request identity threaded into tools
+      logger.cpp/hpp          # spdlog initialization
+    cli/
+      cli_main.cpp/hpp        # `mcp_bridge auth …` dispatcher
+      auth_create.cpp         # Create user + write record + SIGHUP
+      auth_rotate.cpp         # Rotate token, invalidate sessions
+      welcome_banner.cpp/hpp  # /dev/tty connection block
+    priv/
+      main.c                  # Setuid helper (libc only) — useradd, install/revoke-grant
     registry/
-      tool_registry.cpp/hpp  # Tool map and discovery
-      tool_types.hpp         # ToolDef struct, handler signature
+      tool_registry.cpp/hpp   # Tool map, MCP-shaped inputSchema synthesis
+      tool_types.hpp          # ToolDef + handler signature
     platform/
-      platform.hpp           # Cross-platform interface
-      linux/                 # Linux implementations
-      windows/               # Windows implementations
+      platform.hpp            # Cross-platform shims
+      linux/   |   windows/
     tools/
-      data/
-        file_ops.cpp/hpp       # 12 file management tools
-        database_ops.cpp/hpp   # 16 database tools
-      networking/
-        port_ops.cpp/hpp       # 5 port/listener tools
-        firewall_ops.cpp/hpp   # 5 firewall tools
-      hosting/
-        webserver_ops.cpp/hpp  # 11 Nginx/Apache tools
-        process_mgmt.cpp/hpp   # 3 process management tools
-      exec/
-        command_ops.cpp/hpp    # 5 command execution tools
-      sandbox/
-        sandbox_ops.cpp/hpp    # 4 sandboxed code execution tools
+      data/{file_ops,database_ops}            # 12 + 16 tools
+      networking/{port_ops,firewall_ops}      #  5 +  5 tools
+      hosting/{webserver_ops,process_mgmt}    # 11 +  3 tools
+      exec/command_ops                        #  5 tools
+      sandbox/sandbox_ops                     #  4 tools
+      admin/grant_ops                         #  2 admin-only tools
 ```
 
 ---
@@ -129,163 +139,219 @@ Database tools work without native connectors by falling back to CLI tools (`mys
 
 ---
 
-## Setup
+## Install
 
-### 1. Build the Binary
-
-Follow the [Build](#build) instructions above.
-
-### 2. Create `.env` File
+### Recommended: one-line installer
 
 ```bash
-cp .env.example .env
+curl -fsSL https://<domain>/install.sh | bash
 ```
 
-Generate a secure API key:
+To inspect first:
 
 ```bash
-openssl rand -hex 32
+curl -fsSL https://<domain>/install.sh | less
 ```
 
-Edit `.env` and set at minimum:
+The installer detects your distro (Ubuntu 22.04/24.04, Debian 12), downloads
+the matching `.deb`, verifies a SHA-256 checksum, runs `apt install`, enables
+the systemd service, and prints a one-time admin token to `/dev/tty` (so the
+token isn't captured in `apt`'s persistent term log).
 
-```env
-API_KEY=your_generated_token
-PORT=8080
-```
+### Apt repo (second-class path)
 
-### 3. Set Permissions
+If your operator policy forbids `curl | bash`, the same `.deb`s are published
+to an apt repo. See `installer/release.md` for the current repo URL.
 
-```bash
-chmod 600 .env
-chmod 755 server_mcp_bridge
-```
+### Manual
 
-### 4. Run
-
-```bash
-./build/server_mcp_bridge
-```
-
-Or with a custom `.env` path:
-
-```bash
-./build/server_mcp_bridge --env /etc/mcp-bridge/.env
-```
-
-### 5. Verify
-
-List all available tools (no auth required):
-
-```bash
-curl http://localhost:8080/?tools
-```
-
-Test a tool:
-
-```bash
-curl -X POST http://localhost:8080/ \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"tool": "ping", "args": {}}'
-```
+Download the right `.deb` for your distro from the Releases page, plus its
+`.deb.sha256` sibling, verify, and `sudo apt install ./mcp-bridge_*.deb`.
 
 ---
 
 ## Configuration
 
-All settings are defined in `.env`. See [.env.example](.env.example) for defaults.
+After install, configuration lives at `/etc/mcp_bridge/mcp.json` (mode 0640,
+owner `root:mcp`). The package ships a template at
+`/usr/share/mcp_bridge/mcp.json.template`; postinst materializes it on first
+install, generating `auth.global_token_salt` and `auth.admin_token_hash` from
+a fresh 32-byte token. The plaintext admin token is printed once to `/dev/tty`
+during install — save it.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| **`API_KEY`** | *(required)* | Bearer token for authenticating requests |
-| `HOST` | `0.0.0.0` | Listen address |
-| `PORT` | `8080` | Listen port |
-| `ENABLE_SSL` | `false` | Enable HTTPS |
-| `SSL_CERT` | | Path to SSL certificate |
-| `SSL_KEY` | | Path to SSL private key |
-| `ALLOWED_IPS` | *(empty = all)* | Comma-separated IP allowlist |
-| `RATE_LIMIT` | `60` | Max requests per minute per IP |
-| `ALLOWED_ROOT` | `/` | Base path for file operations (path traversal protection) |
-| `DANGEROUS_TOOLS_ENABLED` | `true` | Enable destructive tools |
-| `ENABLE_RAW_QUERIES` | `false` | Allow `run_query` and `run_query_file` tools |
-| `MYSQL_HOST` | `localhost` | MySQL/MariaDB host |
-| `MYSQL_PORT` | `3306` | MySQL/MariaDB port |
-| `MYSQL_ROOT_USER` | `root` | MySQL admin user |
-| `MYSQL_ROOT_PASSWORD` | | MySQL admin password |
-| `POSTGRES_HOST` | `localhost` | PostgreSQL host |
-| `POSTGRES_PORT` | `5432` | PostgreSQL port |
-| `POSTGRES_ROOT_USER` | `postgres` | PostgreSQL admin user |
-| `POSTGRES_ROOT_PASSWORD` | | PostgreSQL admin password |
-| `NGINX_CONFIG_DIR` | `/etc/nginx` | Nginx configuration directory |
-| `APACHE_CONFIG_DIR` | `/etc/apache2` | Apache configuration directory |
-| `CERTBOT_PATH` | `/usr/bin/certbot` | Path to certbot binary |
-| `SANDBOX_TEMP_DIR` | `/tmp/mcp_sandbox` | Temp directory for sandbox execution |
-| `SANDBOX_DEFAULT_TIMEOUT` | `30` | Default sandbox timeout (seconds) |
-| `SANDBOX_DEFAULT_MEMORY_MB` | `256` | Default sandbox memory limit (MB) |
-| `SANDBOX_ENABLE_NETWORK` | `false` | Allow network access in sandbox |
-| `LOG_FILE` | `logs/server.log` | Log file path |
-| `LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+The JSON layout, with defaults:
 
----
-
-## Authentication
-
-All tool execution requests require a Bearer token:
-
-```
-Authorization: Bearer YOUR_API_KEY
-```
-
-The `GET /?tools` listing endpoint does **not** require authentication.
-
----
-
-## Request Format
-
-```http
-POST /
-Authorization: Bearer YOUR_API_KEY
-Content-Type: application/json
-
+```jsonc
 {
-  "tool": "tool_name",
-  "args": {
-    "param1": "value1",
-    "param2": "value2"
+  "server":   { "host": "0.0.0.0", "port": 8080,
+                "enable_ssl": false, "ssl_cert": "", "ssl_key": "" },
+  "auth":     { "global_token_salt": "<hex>",
+                "admin_token_hash":  "<hex>" },
+  "paths":    { "users_dir":   "/var/lib/mcp_bridge/users",
+                "state_dir":   "/var/lib/mcp_bridge/state",
+                "sudoers_dir": "/etc/sudoers.d",
+                "helper_path": "/usr/lib/mcp_bridge/mcp_bridge-priv" },
+  "security": { "allowed_ips": [], "rate_limit": 60,
+                "allowed_root": "/",
+                "dangerous_tools_enabled": true,
+                "enable_raw_queries": false },
+  "mysql":    { "host": "localhost", "port": 3306,
+                "root_user": "root", "root_password": "" },
+  "postgres": { "host": "localhost", "port": 5432,
+                "root_user": "postgres", "root_password": "" },
+  "webserver":{ "nginx_config_dir": "/etc/nginx",
+                "apache_config_dir": "/etc/apache2",
+                "certbot_path": "/usr/bin/certbot" },
+  "sandbox":  { "temp_dir": "/tmp/mcp_sandbox",
+                "default_timeout": 30, "default_memory_mb": 256,
+                "enable_network": false },
+  "logging":  { "file": "/var/log/mcp_bridge/server.log",
+                "level": "info" },
+  "grant_sweep_interval_seconds": 30,
+  "sudo_grant_templates": [ /* see Privilege escalation section */ ]
+}
+```
+
+Send `SIGHUP` (or `systemctl reload mcp-bridge`) after editing user records;
+the `/etc/mcp_bridge/mcp.json` file itself is read once at startup.
+
+---
+
+## Provisioning users
+
+The single shared admin token bootstraps the install. Beyond that, each
+operator gets their own user record under `/var/lib/mcp_bridge/users/`:
+
+```bash
+sudo mcp_bridge auth create --name "Bob" --email "bob@example.com"
+# (interactive prompts if --name / --email omitted)
+
+sudo mcp_bridge auth create --admin --non-interactive \
+    --name "Alice" --email "alice@example.com"
+
+sudo mcp_bridge auth rotate <shortid>
+```
+
+Each user gets:
+- An 8-char `shortid` (RFC 4648 base32, lowercase).
+- A POSIX account `mcp_user_<shortid>` (no shell, not in the sudo group).
+- A 32-byte hex bearer token, printed once on `/dev/tty`. Lost? Rotate.
+- A user record JSON file storing only the salted SHA-256 hash of the token.
+
+The daemon picks up new/rotated users on `SIGHUP` (sent automatically by the
+CLI when it can read `/var/lib/mcp_bridge/state/daemon.pid`).
+
+---
+
+## Protocol — native MCP over JSON-RPC 2.0
+
+The daemon speaks **MCP** ([Model Context Protocol](https://modelcontextprotocol.io))
+over streamable HTTP. Connect with Claude Desktop, Cursor, LangChain
+`MultiServerMCPClient`, or any MCP-compatible client by pointing it at:
+
+```
+http://<host>:8080/
+Authorization: Bearer <your token>
+```
+
+Methods supported (JSON-RPC 2.0 envelope):
+
+| Method                       | Purpose                                                  |
+|------------------------------|----------------------------------------------------------|
+| `initialize`                 | Handshake; server returns `Mcp-Session-Id` in the header |
+| `notifications/initialized`  | Client→server notification, no reply                     |
+| `ping`                       | Liveness                                                 |
+| `tools/list`                 | All registered tools with their `inputSchema`            |
+| `tools/call`                 | Invoke a tool — params: `{name, arguments}`              |
+| `shutdown`                   | Tears down the session                                   |
+
+Every method except `initialize` requires the `Mcp-Session-Id` header echoed
+back from the `initialize` response. A session is bound to the bearer hash
+that issued it; rotating that user's token invalidates every active session.
+
+### Raw curl example
+
+```bash
+TOKEN="<your token>"
+URL="http://localhost:8080/"
+
+# 1. initialize, capture session id
+SESS=$(curl -sS -D - -X POST "$URL" \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}' \
+    | awk 'tolower($1)=="mcp-session-id:"{print $2}' | tr -d '\r')
+
+# 2. list tools
+curl -sS -X POST "$URL" \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -H "Mcp-Session-Id: $SESS" \
+    -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# 3. call ping
+curl -sS -X POST "$URL" \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -H "Mcp-Session-Id: $SESS" \
+    -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ping","arguments":{}}}'
+```
+
+Server-sent events for server→client notifications are available at
+`GET /` (same auth + session id required); v1 emits a `ready` event at
+connect and 30-second heartbeats. Tool-call results return on the POST.
+
+### JSON-RPC error codes
+
+| Code     | When                                     |
+|----------|------------------------------------------|
+| `-32700` | Body is not parseable JSON               |
+| `-32600` | Envelope is not valid JSON-RPC, or session is missing/mismatched |
+| `-32601` | Unknown method                           |
+| `-32602` | Bad / missing params (incl. tool args)   |
+| `-32603` | Internal error                           |
+
+### Public probe
+
+`GET /healthz` returns `ok` without auth — useful for load-balancer probes.
+It deliberately does **not** expose tool metadata; that's `tools/list`.
+
+---
+
+## Privilege escalation (sudoers grants)
+
+The daemon runs as a non-privileged user `mcp` (not in the sudo group). For
+operations that need root, it issues **time-limited sudoers drop-ins** via a
+setuid helper at `/usr/lib/mcp_bridge/mcp_bridge-priv` (mode 4750, root:mcp).
+
+Templates are operator-defined in `mcp.json`:
+
+```jsonc
+"sudo_grant_templates": [
+  {
+    "name": "systemctl_restart",
+    "binary": "/usr/bin/systemctl",
+    "argv":   ["restart", "{service}"],
+    "params": { "service": "^[a-z0-9._-]+$" }
   }
-}
+]
 ```
 
-## Response Format
+Tools call the daemon-internal `request_grant(ctx, shortid, template, args, ttl)`
+API; the daemon validates the captured args against each `params` regex,
+charset-checks the rendered command (no shell metacharacters), atomically
+writes the spec to `/var/lib/mcp_bridge/state/`, invokes the helper, which
+re-validates the spec shape, runs `visudo -cf`, and renames into
+`/etc/sudoers.d/mcp_grant_<grantid>`. A sweeper thread revokes expired
+grants; a startup reconciler removes orphans left by crashed daemons. Every
+operation emits a `LOG_AUTHPRIV` syslog line under the
+`mcp-bridge-sudoers` identifier — `journalctl -t mcp-bridge-sudoers`.
 
-Success:
-
-```json
-{
-  "success": true,
-  "data": { ... },
-  "error": null
-}
-```
-
-Error:
-
-```json
-{
-  "success": false,
-  "data": null,
-  "error": "Error message"
-}
-```
-
-HTTP status codes: `200` success, `400` bad request, `401` unauthorized, `403` forbidden, `429` rate limited, `500` internal error.
+The admin-only HTTP tools `grant_request` and `grant_revoke` expose this
+to MCP clients.
 
 ---
 
 ## Available Tools
 
-62 tools across 8 modules.
+64 tools across 9 modules.
 
 ### Data — Files (12 tools)
 
@@ -326,7 +392,7 @@ HTTP status codes: `200` success, `400` bad request, `401` unauthorized, `403` f
 | `check_database` | `database` | `engine` | Check database integrity |
 
 The `engine` argument defaults to `"mysql"`. Set to `"postgres"` for PostgreSQL.
-`run_query` and `run_query_file` require `ENABLE_RAW_QUERIES=true` in `.env`.
+`run_query` and `run_query_file` require `security.enable_raw_queries: true` in `mcp.json`.
 
 ### Networking — Ports (5 tools)
 
@@ -408,81 +474,80 @@ Isolation levels:
 |------|-------------|
 | `ping` | Health check, returns `{"pong": true}` |
 
+### Admin (2 tools, admin-only)
+
+| Tool | Required Args | Optional Args | Description |
+|------|--------------|---------------|-------------|
+| `grant_request` | `shortid`, `template`, `captured_args`, `ttl_seconds` | | Issue a time-limited sudoers drop-in via the privileged helper. |
+| `grant_revoke`  | `grantid` | | Revoke a previously-issued drop-in. Idempotent. |
+
 ---
 
-## Usage Examples
+## Usage examples
+
+All examples assume the bearer token is in `$TOKEN` and the `Mcp-Session-Id`
+captured from `initialize` is in `$SESS` — see the curl example in the
+Protocol section above. Every call is `tools/call` with `{name, arguments}`.
 
 ### List files
 
 ```bash
-curl -X POST http://localhost:8080/ \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+curl -sS -X POST "$URL" \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SESS" \
   -H "Content-Type: application/json" \
-  -d '{"tool": "list_files", "args": {"path": "/var/www"}}'
+  -d '{"jsonrpc":"2.0","id":10,"method":"tools/call",
+       "params":{"name":"list_files","arguments":{"path":"/var/www"}}}'
 ```
 
-### Create Nginx virtual host
+### Create an Nginx virtual host
 
 ```bash
-curl -X POST http://localhost:8080/ \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+curl -sS -X POST "$URL" \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SESS" \
   -H "Content-Type: application/json" \
-  -d '{
-    "tool": "create_vhost",
-    "args": {
-      "domain": "mysite.example.com",
-      "root": "/var/www/mysite",
-      "server": "nginx"
-    }
-  }'
+  -d '{"jsonrpc":"2.0","id":11,"method":"tools/call",
+       "params":{"name":"create_vhost",
+                 "arguments":{"domain":"mysite.example.com",
+                              "root":"/var/www/mysite","server":"nginx"}}}'
 ```
 
 ### Run a SQL query
 
 ```bash
-curl -X POST http://localhost:8080/ \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+curl -sS -X POST "$URL" \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SESS" \
   -H "Content-Type: application/json" \
-  -d '{
-    "tool": "run_query",
-    "args": {
-      "database": "myapp",
-      "query": "SELECT COUNT(*) FROM users;"
-    }
-  }'
+  -d '{"jsonrpc":"2.0","id":12,"method":"tools/call",
+       "params":{"name":"run_query",
+                 "arguments":{"database":"myapp",
+                              "query":"SELECT COUNT(*) FROM users;"}}}'
 ```
 
-### Execute Python code in sandbox
+### Execute Python in the sandbox
 
 ```bash
-curl -X POST http://localhost:8080/ \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+curl -sS -X POST "$URL" \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SESS" \
   -H "Content-Type: application/json" \
-  -d '{
-    "tool": "sandbox_run",
-    "args": {
-      "language": "python",
-      "code": "print(sum(range(100)))",
-      "timeout": 10,
-      "memory_mb": 128
-    }
-  }'
+  -d '{"jsonrpc":"2.0","id":13,"method":"tools/call",
+       "params":{"name":"sandbox_run",
+                 "arguments":{"language":"python",
+                              "code":"print(sum(range(100)))",
+                              "timeout":10,"memory_mb":128}}}'
 ```
 
-### Open a firewall port
+### Issue a sudoers grant (admin only)
 
 ```bash
-curl -X POST http://localhost:8080/ \
-  -H "Authorization: Bearer YOUR_API_KEY" \
+curl -sS -X POST "$URL" \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SESS" \
   -H "Content-Type: application/json" \
-  -d '{
-    "tool": "add_firewall_rule",
-    "args": {
-      "port": 3000,
-      "action": "allow",
-      "protocol": "tcp"
-    }
-  }'
+  -d '{"jsonrpc":"2.0","id":14,"method":"tools/call",
+       "params":{"name":"grant_request",
+                 "arguments":{"shortid":"abc23456",
+                              "template":"systemctl_restart",
+                              "captured_args":{"service":"nginx"},
+                              "ttl_seconds":300}}}'
 ```
 
 ---
@@ -501,52 +566,58 @@ All tool executions are logged to the console and to `logs/server.log` (rotating
 
 ## Rate Limiting
 
-Default: 60 requests per minute per IP address. Configurable via `RATE_LIMIT` in `.env`. Returns HTTP 429 when exceeded.
+Default: 60 requests per minute per **authenticated user** (sliding 1-minute
+window, idle buckets garbage-collected after 5 minutes). Configurable via
+`security.rate_limit` in `mcp.json`. Returns HTTP 429 when exceeded.
 
 ---
 
 ## Security
 
-- **Protect `.env`** — never commit it or expose it publicly. Set `chmod 600`.
-- **Use a strong, random `API_KEY`** — generated with `openssl rand -hex 32`.
-- **`ALLOWED_ROOT`** — restricts file operations to a base directory, preventing path traversal.
-- **`ALLOWED_IPS`** — restricts access to specific IP addresses.
-- **`ENABLE_RAW_QUERIES=false`** — raw SQL execution is disabled by default.
-- **`DANGEROUS_TOOLS_ENABLED=false`** — disables destructive tools (delete, drop, kill).
-- **Sandbox isolation** — sandboxed code runs without network access, with memory/time limits, in a restricted filesystem. Uses Bubblewrap, namespaces, or ulimit depending on availability.
-- **Constant-time auth** — Bearer token comparison resists timing attacks.
-- **Database name validation** — only alphanumeric and underscore characters accepted.
+- **Tokens stored as hashes.** `mcp.json` carries `auth.global_token_salt`
+  and `auth.admin_token_hash`; user records carry `token_hash`. Plaintext
+  tokens are shown only at creation/rotation time, on `/dev/tty`.
+- **Daemon runs as a non-privileged `mcp` user**, not in the sudo group.
+  Privileged ops go through the setuid helper at
+  `/usr/lib/mcp_bridge/mcp_bridge-priv` (mode 4750, root:mcp).
+- **Per-OS-user multi-tenancy.** Each provisioned user gets a POSIX account
+  `mcp_user_<shortid>`, no shell, not in sudo. POSIX permissions and
+  per-grant sudoers drop-ins are the authorization layer.
+- **Sudoers grants are time-limited and reconciled on startup.** Operator-
+  defined templates only — no free-form sudo specs cross the helper boundary.
+- **`security.allowed_root`** restricts file operations to a base directory.
+- **`security.allowed_ips`** restricts access to a specific list.
+- **`security.enable_raw_queries=false`** disables `run_query` /
+  `run_query_file` by default.
+- **`security.dangerous_tools_enabled=false`** disables destructive tools
+  (delete, drop, kill).
+- **Sandbox isolation** — sandboxed code runs without network access, with
+  memory/time limits, in a restricted filesystem. Uses Bubblewrap, Linux
+  namespaces, or `ulimit` depending on availability.
+- **Constant-time hash comparison** for bearer auth and session bindings.
+- **Database name validation** — only alphanumerics and underscore.
 
 ---
 
 ## Running as a Service
 
-### systemd (Linux)
-
-Create `/etc/systemd/system/mcp-bridge.service`:
-
-```ini
-[Unit]
-Description=Server MCP Bridge
-After=network.target
-
-[Service]
-Type=simple
-User=www-data
-WorkingDirectory=/opt/mcp-bridge
-ExecStart=/opt/mcp-bridge/server_mcp_bridge
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
+The `.deb` ships a hardened systemd unit at
+`/usr/lib/systemd/system/mcp-bridge.service` (User=mcp, Group=mcp, plus
+`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=yes`,
+`ProtectKernel*`, `PrivateTmp`, scoped `ReadWritePaths`). Operate it with:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable mcp-bridge
-sudo systemctl start mcp-bridge
+sudo systemctl status   mcp-bridge
+sudo systemctl restart  mcp-bridge
+sudo systemctl reload   mcp-bridge   # equivalent to SIGHUP — picks up new users
+sudo journalctl -u      mcp-bridge -f
+sudo journalctl -t      mcp-bridge-sudoers   # sudoers-grant audit trail
 ```
+
+If you're running outside the `.deb`, copy the unit file from
+`debian/mcp-bridge.service`, install the binary at `/usr/bin/mcp_bridge`
+and the helper at `/usr/lib/mcp_bridge/mcp_bridge-priv` (mode 4750, root:mcp),
+then `systemctl daemon-reload && systemctl enable --now mcp-bridge`.
 
 ---
 
@@ -566,12 +637,17 @@ ToolRegistry::instance().register_tool("tool_name", {
     "", "Description of the tool",
     {"required_arg1", "required_arg2"},  // validated before handler is called
     {"optional_arg1"},
-    [](const json& args) -> json {
-        // implementation
+    [](const RequestContext& ctx, const json& args) -> json {
+        // ctx carries user_id, os_username, is_admin, session_id, bearer_hash, client_ip
+        // For admin-gated tools, refuse early: if (!ctx.is_admin) throw …;
         return {{"key", "value"}};
     }
 });
 ```
+
+Admin-only tools live under `src/tools/admin/`. The daemon-internal
+`Server::grants().request_grant(...)` is the only sanctioned way to obtain
+a temporary sudoers drop-in — never shell out to `sudo` from a tool.
 
 ---
 

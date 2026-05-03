@@ -44,7 +44,7 @@ void register_database_tools() {
     reg.register_tool("list_databases", {
         "", "List all databases",
         {}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             ProcessResult result;
             if (is_mysql(args)) {
@@ -69,7 +69,7 @@ void register_database_tools() {
     reg.register_tool("create_database", {
         "", "Create a new database",
         {"name"}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string name = args["name"];
             validate_name(name);
@@ -87,7 +87,7 @@ void register_database_tools() {
     reg.register_tool("delete_database", {
         "", "Drop a database",
         {"name"}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string name = args["name"];
             validate_name(name);
@@ -105,7 +105,7 @@ void register_database_tools() {
     reg.register_tool("list_db_users", {
         "", "List database users",
         {}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             ProcessResult result;
             if (is_mysql(args)) {
@@ -128,7 +128,7 @@ void register_database_tools() {
     reg.register_tool("create_db_user", {
         "", "Create a database user",
         {"username", "password"}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string user = args["username"];
             std::string pass = args["password"];
@@ -149,7 +149,7 @@ void register_database_tools() {
     reg.register_tool("delete_db_user", {
         "", "Drop a database user",
         {"username"}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string user = args["username"];
             validate_name(user);
@@ -167,7 +167,7 @@ void register_database_tools() {
     reg.register_tool("grant_privileges", {
         "", "Grant privileges to a user on a database",
         {"username", "database"}, {"privileges", "engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string user = args["username"];
             std::string db = args["database"];
@@ -190,7 +190,7 @@ void register_database_tools() {
     reg.register_tool("revoke_privileges", {
         "", "Revoke all privileges from a user on a database",
         {"username", "database"}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string user = args["username"];
             std::string db = args["database"];
@@ -212,7 +212,7 @@ void register_database_tools() {
     reg.register_tool("run_query", {
         "", "Execute a SQL query and return results",
         {"database", "query"}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             if (!Server::config().enable_raw_queries) {
                 throw std::runtime_error("Raw queries are disabled. Set ENABLE_RAW_QUERIES=true in .env");
             }
@@ -238,7 +238,7 @@ void register_database_tools() {
     reg.register_tool("run_query_file", {
         "", "Execute a SQL file against a database",
         {"database", "path"}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             if (!Server::config().enable_raw_queries) {
                 throw std::runtime_error("Raw queries are disabled. Set ENABLE_RAW_QUERIES=true in .env");
             }
@@ -267,7 +267,7 @@ void register_database_tools() {
     reg.register_tool("backup_database", {
         "", "Backup a database to a dump file",
         {"database"}, {"path", "engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string db = args["database"];
             std::string path = args.value("path", db + "_backup.sql");
@@ -293,7 +293,7 @@ void register_database_tools() {
     reg.register_tool("restore_database", {
         "", "Restore a database from a dump file",
         {"database", "path"}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string db = args["database"];
             std::string path = args["path"];
@@ -319,7 +319,7 @@ void register_database_tools() {
     reg.register_tool("list_tables", {
         "", "List tables in a database",
         {"database"}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string db = args["database"];
             validate_name(db);
@@ -345,7 +345,7 @@ void register_database_tools() {
     reg.register_tool("describe_table", {
         "", "Show table schema/structure",
         {"database", "table"}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string db = args["database"];
             std::string table = args["table"];
@@ -366,7 +366,7 @@ void register_database_tools() {
     reg.register_tool("db_server_info", {
         "", "Get database server version and status",
         {}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             ProcessResult result;
             if (is_mysql(args)) {
@@ -382,7 +382,7 @@ void register_database_tools() {
     reg.register_tool("check_database", {
         "", "Check/repair database integrity",
         {"database"}, {"engine"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string db = args["database"];
             validate_name(db);

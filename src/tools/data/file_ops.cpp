@@ -1,7 +1,6 @@
 #include "tools/data/file_ops.hpp"
 #include "registry/tool_registry.hpp"
 #include "core/server.hpp"
-#include "core/response.hpp"
 #include "platform/platform.hpp"
 #include <json.hpp>
 #include <filesystem>
@@ -46,7 +45,7 @@ void register_file_tools() {
     reg.register_tool("list_files", {
         "", "List directory contents with metadata",
         {}, {"path"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string path = args.value("path", "/");
             if (!is_path_allowed(path)) throw std::runtime_error("Path not allowed");
             json files = json::array();
@@ -60,7 +59,7 @@ void register_file_tools() {
     reg.register_tool("read_file", {
         "", "Read file contents",
         {"path"}, {"offset", "limit"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string path = args["path"];
             if (!is_path_allowed(path)) throw std::runtime_error("Path not allowed");
             std::ifstream file(path);
@@ -86,7 +85,7 @@ void register_file_tools() {
     reg.register_tool("write_file", {
         "", "Write content to a file",
         {"path", "content"}, {"create_dirs"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string path = args["path"];
             if (!is_path_allowed(path)) throw std::runtime_error("Path not allowed");
 
@@ -104,7 +103,7 @@ void register_file_tools() {
     reg.register_tool("delete_file", {
         "", "Delete a file or directory",
         {"path"}, {"recursive"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string path = args["path"];
             if (!is_path_allowed(path)) throw std::runtime_error("Path not allowed");
 
@@ -122,7 +121,7 @@ void register_file_tools() {
     reg.register_tool("move_file", {
         "", "Move or rename a file/directory",
         {"source", "destination"}, {},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string src = args["source"];
             std::string dst = args["destination"];
             if (!is_path_allowed(src) || !is_path_allowed(dst))
@@ -135,7 +134,7 @@ void register_file_tools() {
     reg.register_tool("copy_file", {
         "", "Copy a file or directory",
         {"source", "destination"}, {"recursive"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string src = args["source"];
             std::string dst = args["destination"];
             if (!is_path_allowed(src) || !is_path_allowed(dst))
@@ -153,7 +152,7 @@ void register_file_tools() {
     reg.register_tool("search_files", {
         "", "Search for files by name pattern or content",
         {"pattern"}, {"path", "type", "recursive"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string pattern = args["pattern"];
             std::string base_path = args.value("path", "/");
             std::string type = args.value("type", "name"); // "name" or "content"
@@ -206,7 +205,7 @@ void register_file_tools() {
     reg.register_tool("file_info", {
         "", "Get detailed file/directory information",
         {"path"}, {},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string path = args["path"];
             if (!is_path_allowed(path)) throw std::runtime_error("Path not allowed");
             auto status = fs::status(path);
@@ -238,7 +237,7 @@ void register_file_tools() {
     reg.register_tool("set_permissions", {
         "", "Set file/directory permissions (chmod)",
         {"path", "mode"}, {"recursive"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string path = args["path"];
             if (!is_path_allowed(path)) throw std::runtime_error("Path not allowed");
             std::string mode = args["mode"];
@@ -260,7 +259,7 @@ void register_file_tools() {
     reg.register_tool("set_owner", {
         "", "Set file owner (Linux only, uses chown)",
         {"path", "owner"}, {"group", "recursive"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
 #ifdef _WIN32
             return {{"error", "set_owner not supported on Windows"}};
 #else
@@ -285,7 +284,7 @@ void register_file_tools() {
     reg.register_tool("create_directory", {
         "", "Create a directory",
         {"path"}, {"recursive"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string path = args["path"];
             if (!is_path_allowed(path)) throw std::runtime_error("Path not allowed");
             bool recursive = args.value("recursive", true);
@@ -297,7 +296,7 @@ void register_file_tools() {
     reg.register_tool("disk_usage", {
         "", "Get disk space information",
         {}, {"path"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string path = args.value("path", "/");
             auto space = fs::space(path);
             return {

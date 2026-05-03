@@ -1,48 +1,95 @@
 #!/bin/sh
 set -e
 
+CONF=/etc/mcp_bridge/mcp.json
+TEMPLATE=/usr/share/mcp_bridge/mcp.json.template
+
 case "$1" in
     configure)
         # Create service user if it doesn't exist
-        if ! getent passwd mcp-bridge >/dev/null 2>&1; then
+        if ! getent passwd mcp >/dev/null 2>&1; then
             adduser --system --group --no-create-home \
-                --home /var/lib/server-mcp-bridge \
-                mcp-bridge
+                --home /var/lib/mcp_bridge \
+                mcp
         fi
 
-        # Set ownership
-        chown -R mcp-bridge:mcp-bridge /var/lib/server-mcp-bridge
-        chown -R mcp-bridge:mcp-bridge /var/log/server-mcp-bridge
+        # Ensure directories exist with the right ownership and modes
+        install -d -m 750 -o root -g mcp /etc/mcp_bridge
+        install -d -m 750 -o mcp  -g mcp /var/lib/mcp_bridge
+        install -d -m 750 -o mcp  -g mcp /var/lib/mcp_bridge/users
+        install -d -m 750 -o mcp  -g mcp /var/lib/mcp_bridge/state
+        install -d -m 750 -o mcp  -g mcp /var/log/mcp_bridge
 
-        # Create env config from example if it doesn't exist
-        if [ ! -f /etc/server-mcp-bridge/env ]; then
-            cp /etc/server-mcp-bridge/env.example /etc/server-mcp-bridge/env
-            # Generate a random API key
-            if command -v openssl >/dev/null 2>&1; then
-                API_KEY=$(openssl rand -hex 32)
-                sed -i "s/^API_KEY=.*/API_KEY=$API_KEY/" /etc/server-mcp-bridge/env
+        # Materialize the JSON config from the template if not already present
+        if [ ! -f "$CONF" ]; then
+            if ! command -v openssl >/dev/null 2>&1; then
+                echo "ERROR: openssl is required to generate the admin token." >&2
+                exit 1
             fi
-            # Set paths for system install
-            sed -i "s|^LOG_FILE=.*|LOG_FILE=/var/log/server-mcp-bridge/server.log|" /etc/server-mcp-bridge/env
-            chmod 600 /etc/server-mcp-bridge/env
-            chown mcp-bridge:mcp-bridge /etc/server-mcp-bridge/env
+            if ! command -v sha256sum >/dev/null 2>&1; then
+                echo "ERROR: sha256sum is required to generate the admin token hash." >&2
+                exit 1
+            fi
+
+            SALT=$(openssl rand -hex 32)
+            TOKEN=$(openssl rand -hex 32)
+            HASH=$(printf '%s%s' "$SALT" "$TOKEN" | sha256sum | awk '{print $1}')
+
+            umask 0177
+            sed -e "s|__GLOBAL_TOKEN_SALT__|$SALT|" \
+                -e "s|__ADMIN_TOKEN_HASH__|$HASH|" \
+                "$TEMPLATE" > "$CONF.tmp"
+            mv "$CONF.tmp" "$CONF"
+            chown root:mcp "$CONF"
+            chmod 0640 "$CONF"
+
             echo ""
             echo "=========================================="
-            echo " Server MCP Bridge installed!"
+            echo " MCP Bridge installed!"
             echo "=========================================="
             echo ""
-            echo " Config: /etc/server-mcp-bridge/env"
-            echo " API Key was auto-generated."
+            echo " Config:    $CONF"
+            echo " Endpoint:  http://localhost:8080/"
             echo ""
-            echo " To view your API key:"
-            echo "   sudo grep API_KEY /etc/server-mcp-bridge/env"
+            echo " Admin API token (save this — it is shown only once):"
+            echo "   $TOKEN"
             echo ""
             echo " To start the service:"
-            echo "   sudo systemctl start server-mcp-bridge"
-            echo "   sudo systemctl enable server-mcp-bridge"
+            echo "   sudo systemctl enable --now mcp-bridge"
             echo ""
             echo "=========================================="
         fi
+
+        # Setuid helper: ownership root:mcp, mode 4750
+        if [ -x /usr/lib/mcp_bridge/mcp_bridge-priv ]; then
+            chown root:mcp /usr/lib/mcp_bridge/mcp_bridge-priv
+            chmod 4750     /usr/lib/mcp_bridge/mcp_bridge-priv
+        fi
+
+        # Non-secret motd (admin token NEVER goes here — it's printed once on /dev/tty above).
+        install -d -m 755 /etc/motd.d
+        cat > /etc/motd.d/mcp_bridge <<'MOTD'
+
+      ******         ******
+    **      **     **      **
+   *          *****          *
+   *           ***           *
+   *          *****          *
+    **      **     **      **
+      ******         ******
+
+  MCP Bridge — running as system user `mcp` (not in the sudo group).
+
+  config:    /etc/mcp_bridge/mcp.json
+  state:     /var/lib/mcp_bridge/
+  logs:      journalctl -u mcp-bridge   |   /var/log/mcp_bridge/server.log
+  endpoint:  http://localhost:8080/
+  service:   sudo systemctl status mcp-bridge
+
+  Provision a new user:   sudo mcp_bridge auth create --name X --email Y
+  Rotate a user's token:  sudo mcp_bridge auth rotate <shortid>
+
+MOTD
 
         # Reload systemd
         if [ -d /run/systemd/system ]; then

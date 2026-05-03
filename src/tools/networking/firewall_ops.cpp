@@ -11,7 +11,7 @@ void register_firewall_tools() {
     reg.register_tool("list_firewall_rules", {
         "", "List current firewall rules",
         {}, {},
-        [](const json&) -> json {
+        [](const RequestContext&, const json&) -> json {
             return {{"rules", list_firewall_rules_raw()}};
         }
     });
@@ -19,7 +19,7 @@ void register_firewall_tools() {
     reg.register_tool("add_firewall_rule", {
         "", "Add a firewall rule to allow or deny traffic on a port",
         {"port", "action"}, {"protocol", "source_ip", "direction"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             FirewallRule rule;
             rule.port = args["port"];
             rule.action = args["action"];
@@ -35,7 +35,7 @@ void register_firewall_tools() {
     reg.register_tool("delete_firewall_rule", {
         "", "Delete a firewall rule by ID",
         {"rule_id"}, {},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string rule_id = args["rule_id"];
             bool ok = delete_firewall_rule(rule_id);
             if (!ok) throw std::runtime_error("Failed to delete firewall rule");
@@ -46,7 +46,7 @@ void register_firewall_tools() {
     reg.register_tool("add_port_forward", {
         "", "Create a port forwarding rule",
         {"source_port", "dest_host", "dest_port"}, {"protocol"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             int src = args["source_port"];
             std::string dest_host = args["dest_host"];
             int dest_port = args["dest_port"];
@@ -60,7 +60,7 @@ void register_firewall_tools() {
     reg.register_tool("delete_port_forward", {
         "", "Remove a port forwarding rule",
         {"source_port"}, {},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             int port = args["source_port"];
             bool ok = delete_port_forward(port);
             if (!ok) throw std::runtime_error("Failed to delete port forward");

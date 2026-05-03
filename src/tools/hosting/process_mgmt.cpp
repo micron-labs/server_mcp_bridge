@@ -11,7 +11,7 @@ void register_process_tools() {
     reg.register_tool("list_processes", {
         "", "List running processes",
         {}, {"filter"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string filter = args.value("filter", "");
             auto procs = list_processes(filter);
             json result = json::array();
@@ -32,7 +32,7 @@ void register_process_tools() {
     reg.register_tool("kill_process", {
         "", "Kill a process by PID",
         {"pid"}, {"signal"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             int pid = args["pid"];
             int sig = args.value("signal", 15);
             bool ok = kill_process_by_pid(pid, sig);
@@ -43,7 +43,7 @@ void register_process_tools() {
     reg.register_tool("process_info", {
         "", "Get detailed information about a process",
         {"pid"}, {},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             int pid = args["pid"];
             auto p = get_process_info(pid);
             if (p.pid < 0) throw std::runtime_error("Process not found: " + std::to_string(pid));

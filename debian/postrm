@@ -3,25 +3,29 @@ set -e
 
 case "$1" in
     purge)
-        # Remove config, logs, and state
-        rm -rf /etc/server-mcp-bridge
-        rm -rf /var/lib/server-mcp-bridge
-        rm -rf /var/log/server-mcp-bridge
+        # Remove sudoers drop-ins issued by the daemon
+        rm -f /etc/sudoers.d/mcp_grant_*
+
+        # Remove config, logs, state, motd
+        rm -rf /etc/mcp_bridge
+        rm -rf /var/lib/mcp_bridge
+        rm -rf /var/log/mcp_bridge
+        rm -f  /etc/motd.d/mcp_bridge
 
         # Remove service user
-        if getent passwd mcp-bridge >/dev/null 2>&1; then
-            deluser --system mcp-bridge || true
+        if getent passwd mcp >/dev/null 2>&1; then
+            deluser --system mcp || true
         fi
-        if getent group mcp-bridge >/dev/null 2>&1; then
-            delgroup --system mcp-bridge || true
+        if getent group mcp >/dev/null 2>&1; then
+            delgroup --system mcp || true
         fi
         ;;
 
     remove)
         # Stop service if running
         if [ -d /run/systemd/system ]; then
-            systemctl stop server-mcp-bridge || true
-            systemctl disable server-mcp-bridge || true
+            systemctl stop mcp-bridge || true
+            systemctl disable mcp-bridge || true
         fi
         ;;
 esac

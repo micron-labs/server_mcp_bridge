@@ -1,8 +1,11 @@
 #pragma once
 #include "core/config.hpp"
-#include "core/rate_limiter.hpp"
 #include "core/context.hpp"
-#include <memory>
+#include "core/grants.hpp"
+#include "core/mcp_router.hpp"
+#include "core/rate_limiter.hpp"
+#include "core/session.hpp"
+#include "core/user_store.hpp"
 
 class Server {
 public:
@@ -12,12 +15,18 @@ public:
     // Shared state accessible by tools
     static Config& config();
     static Context& context();
+    static GrantManager& grants();
 
 private:
     Config config_;
+    UserStore users_;
     RateLimiter rate_limiter_;
     Context context_;
+    GrantManager grants_;
+    SessionStore sessions_;
+    McpRouter router_;
 
     static Config* s_config_;
     static Context* s_context_;
+    static GrantManager* s_grants_;
 };

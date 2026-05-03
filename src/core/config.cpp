@@ -1,106 +1,128 @@
 #include "core/config.hpp"
+#include <json.hpp>
 #include <fstream>
-#include <sstream>
-#include <algorithm>
-#include <iostream>
+#include <stdexcept>
 
-static std::string trim(const std::string& s) {
-    auto start = s.find_first_not_of(" \t\r\n");
-    if (start == std::string::npos) return "";
-    auto end = s.find_last_not_of(" \t\r\n");
-    return s.substr(start, end - start + 1);
+using json = nlohmann::json;
+
+namespace {
+
+template <typename T>
+T get_or(const json& obj, const char* key, T fallback) {
+    auto it = obj.find(key);
+    if (it == obj.end() || it->is_null()) return fallback;
+    return it->template get<T>();
 }
 
-static std::vector<std::string> split_csv(const std::string& s) {
-    std::vector<std::string> result;
-    std::istringstream stream(s);
-    std::string item;
-    while (std::getline(stream, item, ',')) {
-        auto trimmed = trim(item);
-        if (!trimmed.empty()) result.push_back(trimmed);
+std::string str_or(const json& obj, const char* key, const std::string& fallback) {
+    auto it = obj.find(key);
+    if (it == obj.end() || it->is_null()) return fallback;
+    if (!it->is_string()) {
+        throw std::runtime_error(std::string("config: '") + key + "' must be a string");
     }
-    return result;
+    return it->get<std::string>();
 }
 
-Config load_config(const std::string& env_path) {
-    Config cfg;
-    std::map<std::string, std::string> env;
+}
 
-    std::ifstream file(env_path);
+Config load_config(const std::string& path) {
+    std::ifstream file(path);
     if (!file.is_open()) {
-        std::cerr << "[config] Warning: Could not open " << env_path << ", using defaults\n";
-        return cfg;
+        throw std::runtime_error("config: cannot open " + path);
     }
 
-    std::string line;
-    while (std::getline(file, line)) {
-        line = trim(line);
-        if (line.empty() || line[0] == '#') continue;
-        auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        auto key = trim(line.substr(0, eq));
-        auto val = trim(line.substr(eq + 1));
-        env[key] = val;
+    json doc;
+    try {
+        file >> doc;
+    } catch (const json::parse_error& e) {
+        throw std::runtime_error("config: parse error in " + path + ": " + e.what());
+    }
+    if (!doc.is_object()) {
+        throw std::runtime_error("config: " + path + " must be a JSON object at the top level");
     }
 
-    auto get = [&](const std::string& key) -> std::string {
-        auto it = env.find(key);
-        return (it != env.end()) ? it->second : "";
-    };
-    auto get_int = [&](const std::string& key, int def) -> int {
-        auto v = get(key);
-        return v.empty() ? def : std::stoi(v);
-    };
-    auto get_bool = [&](const std::string& key, bool def) -> bool {
-        auto v = get(key);
-        if (v.empty()) return def;
-        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-        return v == "true" || v == "1" || v == "yes";
-    };
+    Config cfg;
 
-    // Auth
-    cfg.api_key = get("API_KEY");
+    if (doc.contains("server") && doc["server"].is_object()) {
+        const auto& s = doc["server"];
+        cfg.host = str_or(s, "host", cfg.host);
+        cfg.port = get_or(s, "port", cfg.port);
+        cfg.enable_ssl = get_or(s, "enable_ssl", cfg.enable_ssl);
+        cfg.ssl_cert = str_or(s, "ssl_cert", cfg.ssl_cert);
+        cfg.ssl_key = str_or(s, "ssl_key", cfg.ssl_key);
+    }
 
-    // Server
-    if (!get("HOST").empty()) cfg.host = get("HOST");
-    cfg.port = get_int("PORT", cfg.port);
-    cfg.enable_ssl = get_bool("ENABLE_SSL", cfg.enable_ssl);
-    if (!get("SSL_CERT").empty()) cfg.ssl_cert = get("SSL_CERT");
-    if (!get("SSL_KEY").empty()) cfg.ssl_key = get("SSL_KEY");
+    if (doc.contains("auth") && doc["auth"].is_object()) {
+        const auto& a = doc["auth"];
+        cfg.global_token_salt = str_or(a, "global_token_salt", "");
+        cfg.admin_token_hash = str_or(a, "admin_token_hash", "");
+    }
 
-    // Security
-    if (!get("ALLOWED_IPS").empty()) cfg.allowed_ips = split_csv(get("ALLOWED_IPS"));
-    cfg.rate_limit = get_int("RATE_LIMIT", cfg.rate_limit);
-    if (!get("ALLOWED_ROOT").empty()) cfg.allowed_root = get("ALLOWED_ROOT");
-    cfg.dangerous_tools_enabled = get_bool("DANGEROUS_TOOLS_ENABLED", cfg.dangerous_tools_enabled);
-    cfg.enable_raw_queries = get_bool("ENABLE_RAW_QUERIES", cfg.enable_raw_queries);
+    if (doc.contains("paths") && doc["paths"].is_object()) {
+        const auto& p = doc["paths"];
+        cfg.users_dir = str_or(p, "users_dir", cfg.users_dir);
+        cfg.state_dir = str_or(p, "state_dir", cfg.state_dir);
+        cfg.sudoers_dir = str_or(p, "sudoers_dir", cfg.sudoers_dir);
+        cfg.helper_path = str_or(p, "helper_path", cfg.helper_path);
+    }
 
-    // MySQL
-    if (!get("MYSQL_HOST").empty()) cfg.mysql_host = get("MYSQL_HOST");
-    cfg.mysql_port = get_int("MYSQL_PORT", cfg.mysql_port);
-    if (!get("MYSQL_ROOT_USER").empty()) cfg.mysql_root_user = get("MYSQL_ROOT_USER");
-    cfg.mysql_root_password = get("MYSQL_ROOT_PASSWORD");
+    cfg.grant_sweep_interval_seconds =
+        get_or(doc, "grant_sweep_interval_seconds", cfg.grant_sweep_interval_seconds);
 
-    // PostgreSQL
-    if (!get("POSTGRES_HOST").empty()) cfg.postgres_host = get("POSTGRES_HOST");
-    cfg.postgres_port = get_int("POSTGRES_PORT", cfg.postgres_port);
-    if (!get("POSTGRES_ROOT_USER").empty()) cfg.postgres_root_user = get("POSTGRES_ROOT_USER");
-    cfg.postgres_root_password = get("POSTGRES_ROOT_PASSWORD");
+    if (doc.contains("sudo_grant_templates")) {
+        cfg.sudo_grant_templates = parse_templates(doc["sudo_grant_templates"]);
+    }
 
-    // Web Server
-    if (!get("NGINX_CONFIG_DIR").empty()) cfg.nginx_config_dir = get("NGINX_CONFIG_DIR");
-    if (!get("APACHE_CONFIG_DIR").empty()) cfg.apache_config_dir = get("APACHE_CONFIG_DIR");
-    if (!get("CERTBOT_PATH").empty()) cfg.certbot_path = get("CERTBOT_PATH");
+    if (doc.contains("security") && doc["security"].is_object()) {
+        const auto& s = doc["security"];
+        if (s.contains("allowed_ips") && s["allowed_ips"].is_array()) {
+            cfg.allowed_ips.clear();
+            for (const auto& v : s["allowed_ips"]) {
+                if (v.is_string()) cfg.allowed_ips.push_back(v.get<std::string>());
+            }
+        }
+        cfg.rate_limit = get_or(s, "rate_limit", cfg.rate_limit);
+        cfg.allowed_root = str_or(s, "allowed_root", cfg.allowed_root);
+        cfg.dangerous_tools_enabled = get_or(s, "dangerous_tools_enabled", cfg.dangerous_tools_enabled);
+        cfg.enable_raw_queries = get_or(s, "enable_raw_queries", cfg.enable_raw_queries);
+    }
 
-    // Sandbox
-    if (!get("SANDBOX_TEMP_DIR").empty()) cfg.sandbox_temp_dir = get("SANDBOX_TEMP_DIR");
-    cfg.sandbox_default_timeout = get_int("SANDBOX_DEFAULT_TIMEOUT", cfg.sandbox_default_timeout);
-    cfg.sandbox_default_memory_mb = get_int("SANDBOX_DEFAULT_MEMORY_MB", cfg.sandbox_default_memory_mb);
-    cfg.sandbox_enable_network = get_bool("SANDBOX_ENABLE_NETWORK", cfg.sandbox_enable_network);
+    if (doc.contains("mysql") && doc["mysql"].is_object()) {
+        const auto& m = doc["mysql"];
+        cfg.mysql_host = str_or(m, "host", cfg.mysql_host);
+        cfg.mysql_port = get_or(m, "port", cfg.mysql_port);
+        cfg.mysql_root_user = str_or(m, "root_user", cfg.mysql_root_user);
+        cfg.mysql_root_password = str_or(m, "root_password", cfg.mysql_root_password);
+    }
 
-    // Logging
-    if (!get("LOG_FILE").empty()) cfg.log_file = get("LOG_FILE");
-    if (!get("LOG_LEVEL").empty()) cfg.log_level = get("LOG_LEVEL");
+    if (doc.contains("postgres") && doc["postgres"].is_object()) {
+        const auto& p = doc["postgres"];
+        cfg.postgres_host = str_or(p, "host", cfg.postgres_host);
+        cfg.postgres_port = get_or(p, "port", cfg.postgres_port);
+        cfg.postgres_root_user = str_or(p, "root_user", cfg.postgres_root_user);
+        cfg.postgres_root_password = str_or(p, "root_password", cfg.postgres_root_password);
+    }
+
+    if (doc.contains("webserver") && doc["webserver"].is_object()) {
+        const auto& w = doc["webserver"];
+        cfg.nginx_config_dir = str_or(w, "nginx_config_dir", cfg.nginx_config_dir);
+        cfg.apache_config_dir = str_or(w, "apache_config_dir", cfg.apache_config_dir);
+        cfg.certbot_path = str_or(w, "certbot_path", cfg.certbot_path);
+    }
+
+    if (doc.contains("sandbox") && doc["sandbox"].is_object()) {
+        const auto& s = doc["sandbox"];
+        cfg.sandbox_temp_dir = str_or(s, "temp_dir", cfg.sandbox_temp_dir);
+        cfg.sandbox_default_timeout = get_or(s, "default_timeout", cfg.sandbox_default_timeout);
+        cfg.sandbox_default_memory_mb = get_or(s, "default_memory_mb", cfg.sandbox_default_memory_mb);
+        cfg.sandbox_enable_network = get_or(s, "enable_network", cfg.sandbox_enable_network);
+    }
+
+    if (doc.contains("logging") && doc["logging"].is_object()) {
+        const auto& l = doc["logging"];
+        cfg.log_file = str_or(l, "file", cfg.log_file);
+        cfg.log_level = str_or(l, "level", cfg.log_level);
+    }
 
     return cfg;
 }

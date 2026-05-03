@@ -18,10 +18,22 @@ const ToolDef* ToolRegistry::find(const std::string& name) const {
 json ToolRegistry::list_all() const {
     json result = json::object();
     for (const auto& [name, def] : tools_) {
+        // Synthesize a minimal JSON Schema from required/optional names so that
+        // an MCP tools/list response can use this directly as `inputSchema`.
+        json properties = json::object();
+        for (const auto& a : def.required) properties[a] = json::object();
+        for (const auto& a : def.optional) properties[a] = json::object();
+        json input_schema = {
+            {"type", "object"},
+            {"properties", properties},
+            {"required", def.required},
+            {"additionalProperties", true}
+        };
         result[name] = {
             {"description", def.description},
             {"required", def.required},
-            {"optional", def.optional}
+            {"optional", def.optional},
+            {"inputSchema", input_schema}
         };
     }
     return result;

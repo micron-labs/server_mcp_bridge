@@ -76,7 +76,7 @@ void register_port_tools() {
     reg.register_tool("list_listening_ports", {
         "", "Show all listening ports on the system",
         {}, {},
-        [](const json&) -> json {
+        [](const RequestContext&, const json&) -> json {
             return {{"output", list_listening_ports_raw()}};
         }
     });
@@ -84,7 +84,7 @@ void register_port_tools() {
     reg.register_tool("check_port", {
         "", "Check if a specific port is open/in-use",
         {"port"}, {"host"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             int port = args["port"];
             std::string host = args.value("host", "localhost");
             bool open = check_port(port, host);
@@ -95,7 +95,7 @@ void register_port_tools() {
     reg.register_tool("start_listener", {
         "", "Start a simple TCP listening service on a port",
         {"port"}, {"protocol", "response"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             int port = args["port"];
             std::string proto = args.value("protocol", "tcp");
             std::string response = args.value("response", "OK\n");
@@ -122,7 +122,7 @@ void register_port_tools() {
     reg.register_tool("stop_listener", {
         "", "Stop a managed listener",
         {"port"}, {},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             int port = args["port"];
             std::lock_guard<std::mutex> lock(listeners_mutex);
             auto it = listeners.find(port);
@@ -142,7 +142,7 @@ void register_port_tools() {
     reg.register_tool("list_listeners", {
         "", "List all active managed listeners",
         {}, {},
-        [](const json&) -> json {
+        [](const RequestContext&, const json&) -> json {
             std::lock_guard<std::mutex> lock(listeners_mutex);
             json result = json::array();
             for (const auto& [port, l] : listeners) {

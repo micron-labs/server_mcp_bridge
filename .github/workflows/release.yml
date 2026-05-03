@@ -72,9 +72,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: server-mcp-bridge-linux-amd64
+            artifact: mcp-bridge-linux-amd64
           - os: windows-latest
-            artifact: server-mcp-bridge-windows-amd64
+            artifact: mcp-bridge-windows-amd64
 
     steps:
       - uses: actions/checkout@v4
@@ -86,10 +86,10 @@ jobs:
           sudo apt-get install -y build-essential cmake libssl-dev pkg-config
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_SSL=ON -DENABLE_MYSQL=OFF -DENABLE_POSTGRES=OFF
           cmake --build build
-          strip build/server_mcp_bridge
+          strip build/mcp_bridge
           mkdir dist
-          cp build/server_mcp_bridge dist/${{ matrix.artifact }}
-          cp .env.example dist/
+          cp build/mcp_bridge dist/${{ matrix.artifact }}
+          cp etc/mcp_bridge/mcp.json.template dist/
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
@@ -97,8 +97,8 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_SSL=OFF -DENABLE_MYSQL=OFF -DENABLE_POSTGRES=OFF
           cmake --build build --config Release
           mkdir dist
-          copy build\Release\server_mcp_bridge.exe dist\${{ matrix.artifact }}.exe
-          copy .env.example dist\
+          copy build\Release\mcp_bridge.exe dist\${{ matrix.artifact }}.exe
+          copy etc\mcp_bridge\mcp.json.template dist\
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -122,7 +122,7 @@ jobs:
       - name: Collect release files
         run: |
           mkdir release
-          find artifacts -type f \( -name "*.deb" -o -name "server-mcp-bridge-*" -o -name "*.exe" \) -exec cp {} release/ \;
+          find artifacts -type f \( -name "*.deb" -o -name "mcp-bridge-*" -o -name "*.exe" \) -exec cp {} release/ \;
           ls -la release/
 
       - name: Create Release
@@ -138,36 +138,36 @@ jobs:
             Download the `.deb` for your distro and install:
 
             ```bash
-            sudo apt install ./server-mcp-bridge_*_amd64.deb
+            sudo apt install ./mcp-bridge_*_amd64.deb
             ```
 
-            The service is installed at `/usr/bin/server-mcp-bridge` with config at `/etc/server-mcp-bridge/env`.
+            The service is installed at `/usr/bin/mcp_bridge` with config at `/etc/mcp_bridge/env`.
             An API key is auto-generated on first install.
 
             ```bash
             # View your API key
-            sudo grep API_KEY /etc/server-mcp-bridge/env
+            sudo grep API_KEY /etc/mcp_bridge/env
 
             # Start the service
-            sudo systemctl start server-mcp-bridge
-            sudo systemctl enable server-mcp-bridge
+            sudo systemctl start mcp-bridge
+            sudo systemctl enable mcp-bridge
             ```
 
             ### Linux (standalone binary)
 
+            For non-`.deb` installs, copy `mcp.json.template` to a path of your
+            choice, fill in `auth.global_token_salt` + `auth.admin_token_hash`
+            (sha256-of-(salt||token), see README), then:
+
             ```bash
-            chmod +x server-mcp-bridge-linux-amd64
-            cp .env.example .env
-            # Edit .env and set API_KEY
-            ./server-mcp-bridge-linux-amd64
+            chmod +x mcp-bridge-linux-amd64
+            ./mcp-bridge-linux-amd64 daemon --config /etc/mcp_bridge/mcp.json
             ```
 
             ### Windows
 
             ```powershell
-            copy .env.example .env
-            # Edit .env and set API_KEY
-            .\server-mcp-bridge-windows-amd64.exe
+            .\mcp-bridge-windows-amd64.exe daemon --config C:\path\to\mcp.json
             ```
 
   publish-apt:

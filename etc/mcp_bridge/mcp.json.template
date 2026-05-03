@@ -1,0 +1,75 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "enable_ssl": false,
+    "ssl_cert": "",
+    "ssl_key": ""
+  },
+
+  "auth": {
+    "global_token_salt": "__GLOBAL_TOKEN_SALT__",
+    "admin_token_hash": "__ADMIN_TOKEN_HASH__"
+  },
+
+  "paths": {
+    "users_dir": "/var/lib/mcp_bridge/users",
+    "state_dir": "/var/lib/mcp_bridge/state",
+    "sudoers_dir": "/etc/sudoers.d",
+    "helper_path": "/usr/lib/mcp_bridge/mcp_bridge-priv"
+  },
+
+  "grant_sweep_interval_seconds": 30,
+
+  "security": {
+    "allowed_ips": [],
+    "rate_limit": 60,
+    "allowed_root": "/",
+    "dangerous_tools_enabled": true,
+    "enable_raw_queries": false
+  },
+
+  "mysql": {
+    "host": "localhost",
+    "port": 3306,
+    "root_user": "root",
+    "root_password": ""
+  },
+
+  "postgres": {
+    "host": "localhost",
+    "port": 5432,
+    "root_user": "postgres",
+    "root_password": ""
+  },
+
+  "webserver": {
+    "nginx_config_dir": "/etc/nginx",
+    "apache_config_dir": "/etc/apache2",
+    "certbot_path": "/usr/bin/certbot"
+  },
+
+  "sandbox": {
+    "temp_dir": "/tmp/mcp_sandbox",
+    "default_timeout": 30,
+    "default_memory_mb": 256,
+    "enable_network": false
+  },
+
+  "logging": {
+    "file": "/var/log/mcp_bridge/server.log",
+    "level": "info"
+  },
+
+  "sudo_grant_templates": [
+    {
+      "name": "systemctl_restart",
+      "description": "Restart a systemd unit by name",
+      "binary": "/usr/bin/systemctl",
+      "argv": ["restart", "{service}"],
+      "params": {
+        "service": "^[a-z0-9._-]+$"
+      }
+    }
+  ]
+}

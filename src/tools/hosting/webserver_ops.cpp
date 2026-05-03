@@ -71,7 +71,7 @@ void register_webserver_tools() {
     reg.register_tool("webserver_status", {
         "", "Check if web server is running and get version",
         {}, {"server"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string server = resolve_server(args);
             auto status = service_action(service_name(server), "status");
             auto version = run_process(server + " -v 2>&1");
@@ -87,7 +87,7 @@ void register_webserver_tools() {
     reg.register_tool("webserver_start", {
         "", "Start the web server",
         {}, {"server"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string server = resolve_server(args);
             auto result = service_action(service_name(server), "start");
             return {{"server", server}, {"started", result.exit_code == 0}, {"output", result.stdout_str}};
@@ -97,7 +97,7 @@ void register_webserver_tools() {
     reg.register_tool("webserver_stop", {
         "", "Stop the web server",
         {}, {"server"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string server = resolve_server(args);
             auto result = service_action(service_name(server), "stop");
             return {{"server", server}, {"stopped", result.exit_code == 0}, {"output", result.stdout_str}};
@@ -107,7 +107,7 @@ void register_webserver_tools() {
     reg.register_tool("webserver_restart", {
         "", "Restart the web server",
         {}, {"server"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string server = resolve_server(args);
             auto result = service_action(service_name(server), "restart");
             return {{"server", server}, {"restarted", result.exit_code == 0}, {"output", result.stdout_str}};
@@ -117,7 +117,7 @@ void register_webserver_tools() {
     reg.register_tool("webserver_reload", {
         "", "Reload web server configuration without restart",
         {}, {"server"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string server = resolve_server(args);
             auto result = service_action(service_name(server), "reload");
             return {{"server", server}, {"reloaded", result.exit_code == 0}, {"output", result.stdout_str}};
@@ -127,7 +127,7 @@ void register_webserver_tools() {
     reg.register_tool("webserver_test_config", {
         "", "Test web server configuration syntax",
         {}, {"server"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string server = resolve_server(args);
             std::string cmd = (server == "nginx") ? "nginx -t 2>&1" : "apache2ctl configtest 2>&1";
             auto result = run_process(cmd);
@@ -138,7 +138,7 @@ void register_webserver_tools() {
     reg.register_tool("list_vhosts", {
         "", "List virtual host configurations",
         {}, {"server"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string server = resolve_server(args);
             std::string dir = sites_available_dir(server);
             json vhosts = json::array();
@@ -161,7 +161,7 @@ void register_webserver_tools() {
     reg.register_tool("get_vhost_config", {
         "", "Read a virtual host configuration file",
         {"domain"}, {"server"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string server = resolve_server(args);
             std::string domain = args["domain"];
             std::string path = sites_available_dir(server) + "/" + domain;
@@ -178,7 +178,7 @@ void register_webserver_tools() {
     reg.register_tool("create_vhost", {
         "", "Create a new virtual host configuration",
         {"domain", "root"}, {"server", "port", "ssl"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string server = resolve_server(args);
             std::string domain = args["domain"];
             std::string root = args["root"];
@@ -214,7 +214,7 @@ void register_webserver_tools() {
     reg.register_tool("delete_vhost", {
         "", "Remove a virtual host configuration",
         {"domain"}, {"server"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string server = resolve_server(args);
             std::string domain = args["domain"];
 
@@ -231,7 +231,7 @@ void register_webserver_tools() {
     reg.register_tool("enable_ssl", {
         "", "Enable SSL for a virtual host (certbot or manual)",
         {"domain"}, {"cert_path", "key_path"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             std::string domain = args["domain"];
             auto& cfg = Server::config();
 

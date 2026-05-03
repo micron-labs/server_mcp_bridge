@@ -15,11 +15,23 @@ override_dh_auto_configure:
 
 override_dh_auto_install:
 	# Install binary
-	install -D -m 755 obj-*/server_mcp_bridge debian/server-mcp-bridge/usr/bin/server-mcp-bridge
+	install -D -m 755 obj-*/mcp_bridge debian/mcp-bridge/usr/bin/mcp_bridge
 
-	# Install default config
-	install -D -m 644 .env.example debian/server-mcp-bridge/etc/server-mcp-bridge/env.example
+	# Install setuid helper. Mode 0750 here; postinst flips to 4750 with root:mcp
+	# ownership (dh_fixperms would otherwise strip the suid bit).
+	install -D -m 0750 obj-*/mcp_bridge-priv \
+		debian/mcp-bridge/usr/lib/mcp_bridge/mcp_bridge-priv
+
+	# Install JSON config template (postinst materializes /etc/mcp_bridge/mcp.json from this)
+	install -D -m 644 etc/mcp_bridge/mcp.json.template \
+		debian/mcp-bridge/usr/share/mcp_bridge/mcp.json.template
 
 	# Create state directories
-	install -d -m 750 debian/server-mcp-bridge/var/lib/server-mcp-bridge
-	install -d -m 750 debian/server-mcp-bridge/var/log/server-mcp-bridge
+	install -d -m 750 debian/mcp-bridge/etc/mcp_bridge
+	install -d -m 750 debian/mcp-bridge/var/lib/mcp_bridge
+	install -d -m 750 debian/mcp-bridge/var/lib/mcp_bridge/users
+	install -d -m 750 debian/mcp-bridge/var/lib/mcp_bridge/state
+	install -d -m 750 debian/mcp-bridge/var/log/mcp_bridge
+
+override_dh_fixperms:
+	dh_fixperms --exclude usr/lib/mcp_bridge/mcp_bridge-priv

@@ -15,8 +15,10 @@ CMakeUserPresets.json
 # dpkg-buildpackage output
 obj-*/
 debian/.debhelper/
+debian/mcp-bridge/
 debian/server-mcp-bridge/
 debian/tmp/
 debian/files
 debian/*.substvars
 debian/*.debhelper.log
+debian/*.debhelper

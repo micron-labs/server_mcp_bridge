@@ -56,7 +56,7 @@ void register_sandbox_tools() {
     reg.register_tool("sandbox_run", {
         "", "Execute code in a sandboxed environment",
         {"language", "code"}, {"timeout", "memory_mb", "stdin"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string lang = args["language"];
             std::string code = args["code"];
@@ -132,7 +132,7 @@ void register_sandbox_tools() {
     reg.register_tool("sandbox_run_file", {
         "", "Execute a file in a sandboxed environment",
         {"language", "path"}, {"timeout", "memory_mb", "stdin", "args"},
-        [](const json& args) -> json {
+        [](const RequestContext&, const json& args) -> json {
             auto& cfg = Server::config();
             std::string lang = args["language"];
             std::string path = args["path"];
@@ -159,7 +159,7 @@ void register_sandbox_tools() {
     reg.register_tool("sandbox_languages", {
         "", "List available sandboxed languages and their runtime status",
         {}, {},
-        [](const json&) -> json {
+        [](const RequestContext&, const json&) -> json {
             json langs = json::array();
             for (const auto& [lang, interp] : LANG_INTERPRETERS) {
                 auto check = run_process("which " + interp + " 2>/dev/null");
@@ -187,7 +187,7 @@ void register_sandbox_tools() {
     reg.register_tool("sandbox_status", {
         "", "Show sandbox capability and isolation status",
         {}, {},
-        [](const json&) -> json {
+        [](const RequestContext&, const json&) -> json {
             auto caps = get_sandbox_capabilities();
             return {
                 {"namespaces", caps.namespaces},

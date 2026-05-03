@@ -1,18 +1,29 @@
 #pragma once
+#include "core/grant_template.hpp"
 #include <string>
 #include <vector>
-#include <map>
 
 struct Config {
-    // Auth
-    std::string api_key;
-
     // Server
     std::string host = "0.0.0.0";
     int port = 8080;
     bool enable_ssl = false;
     std::string ssl_cert;
     std::string ssl_key;
+
+    // Auth
+    std::string global_token_salt;   // hex string, written by postinst
+    std::string admin_token_hash;    // hex string, sha256(salt || admin_token)
+
+    // Paths
+    std::string users_dir = "/var/lib/mcp_bridge/users";
+    std::string state_dir = "/var/lib/mcp_bridge/state";
+    std::string sudoers_dir = "/etc/sudoers.d";
+    std::string helper_path = "/usr/lib/mcp_bridge/mcp_bridge-priv";
+    int grant_sweep_interval_seconds = 30;
+
+    // Sudoers grant templates (rendered by daemon, installed via setuid helper)
+    std::vector<GrantTemplate> sudo_grant_templates;
 
     // Security
     std::vector<std::string> allowed_ips;
@@ -45,8 +56,8 @@ struct Config {
     bool sandbox_enable_network = false;
 
     // Logging
-    std::string log_file = "logs/server.log";
+    std::string log_file = "/var/log/mcp_bridge/server.log";
     std::string log_level = "info";
 };
 
-Config load_config(const std::string& env_path = ".env");
+Config load_config(const std::string& path = "/etc/mcp_bridge/mcp.json");
