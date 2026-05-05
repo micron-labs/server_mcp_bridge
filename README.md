@@ -13,7 +13,7 @@ The system runs as a single compiled binary on your server and provides:
 - Native MCP / JSON-RPC 2.0 transport with `Mcp-Session-Id` session binding
 - Per-OS-user multi-tenancy (each end user gets a `mcp_user_<shortid>` POSIX account)
 - Setuid helper for time-limited sudoers grants (admin-only)
-- Tool-based execution model (64 tools across 9 modules)
+- Tool-based execution model (67 tools across 9 modules)
 - Context tracking
 - Logging via systemd journal + rotating file + `LOG_AUTHPRIV` audit trail
 - Per-user rate limiting
@@ -87,7 +87,7 @@ mcp_bridge/
       hosting/{webserver_ops,process_mgmt}    # 11 +  3 tools
       exec/command_ops                        #  5 tools
       sandbox/sandbox_ops                     #  4 tools
-      admin/grant_ops                         #  2 admin-only tools
+      admin/{grant_ops,user_ops}              #  2 + 3 admin-only tools
 ```
 
 ---
@@ -351,7 +351,7 @@ to MCP clients.
 
 ## Available Tools
 
-64 tools across 9 modules.
+67 tools across 9 modules.
 
 ### Data — Files (12 tools)
 
@@ -474,12 +474,17 @@ Isolation levels:
 |------|-------------|
 | `ping` | Health check, returns `{"pong": true}` |
 
-### Admin (2 tools, admin-only)
+### Admin (5 tools, admin-only)
 
 | Tool | Required Args | Optional Args | Description |
 |------|--------------|---------------|-------------|
 | `grant_request` | `shortid`, `template`, `captured_args`, `ttl_seconds` | | Issue a time-limited sudoers drop-in via the privileged helper. |
 | `grant_revoke`  | `grantid` | | Revoke a previously-issued drop-in. Idempotent. |
+| `user_create`   | `name`, `email` | `is_admin` | Provision a new MCP user — generates shortid + bearer token, writes the user record, and creates the `mcp_user_<shortid>` POSIX account via the helper. **The returned token is shown once.** |
+| `user_update`   | `shortid` | `name`, `email`, `is_admin` | Update a user's mutable details. At least one optional field must be supplied. Token is unaffected — use `auth rotate` for that. |
+| `user_delete`   | `shortid` | | Delete the user record and remove the `mcp_user_<shortid>` POSIX account. Idempotent on the OS side. Refuses to delete the calling user. |
+
+The same operations are available offline via the [`mcp_bridge auth …`](#provisioning-users) CLI. Tool-based provisioning is a convenience for AI-driven onboarding flows; treat the returned bearer token from `user_create` as one-shot.
 
 ---
 
@@ -548,6 +553,18 @@ curl -sS -X POST "$URL" \
                               "template":"systemctl_restart",
                               "captured_args":{"service":"nginx"},
                               "ttl_seconds":300}}}'
+```
+
+### Provision a new user (admin only)
+
+```bash
+curl -sS -X POST "$URL" \
+  -H "Authorization: Bearer $TOKEN" -H "Mcp-Session-Id: $SESS" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":15,"method":"tools/call",
+       "params":{"name":"user_create",
+                 "arguments":{"name":"Bob","email":"bob@example.com"}}}'
+# response.result.token is the new user's bearer — capture it now, it cannot be retrieved later.
 ```
 
 ---

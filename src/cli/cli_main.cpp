@@ -4,6 +4,7 @@
 
 int cli_auth_create(int argc, char** argv);
 int cli_auth_rotate(int argc, char** argv);
+int cli_auth_list(int argc, char** argv);
 
 static void print_usage() {
     std::fputs(
@@ -11,6 +12,7 @@ static void print_usage() {
         "  mcp_bridge daemon [--config <path>]              Run the server (default)\n"
         "  mcp_bridge auth create [opts]                    Create a user record\n"
         "  mcp_bridge auth rotate <shortid> [opts]          Rotate a user's token\n"
+        "  mcp_bridge auth list [opts]                      List all user records\n"
         "  mcp_bridge --help                                This message\n"
         "\n"
         "auth create options:\n"
@@ -22,6 +24,10 @@ static void print_usage() {
         "\n"
         "auth rotate options:\n"
         "  --non-interactive       Print token to stdout instead of /dev/tty\n"
+        "  --config <path>         Daemon config (default: /etc/mcp_bridge/mcp.json)\n"
+        "\n"
+        "auth list options:\n"
+        "  --json                  Emit JSON array instead of a human table\n"
         "  --config <path>         Daemon config (default: /etc/mcp_bridge/mcp.json)\n",
         stderr);
 }
@@ -36,6 +42,7 @@ int cli_main(int argc, char** argv) {
     }
     if (std::strcmp(argv[2], "create") == 0) return cli_auth_create(argc - 3, argv + 3);
     if (std::strcmp(argv[2], "rotate") == 0) return cli_auth_rotate(argc - 3, argv + 3);
+    if (std::strcmp(argv[2], "list")   == 0) return cli_auth_list  (argc - 3, argv + 3);
 
     print_usage();
     return 2;

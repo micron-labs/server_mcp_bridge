@@ -14,6 +14,7 @@
 #include "tools/exec/command_ops.hpp"
 #include "tools/sandbox/sandbox_ops.hpp"
 #include "tools/admin/grant_ops.hpp"
+#include "tools/admin/user_ops.hpp"
 
 #include <json.hpp>
 #include <cstring>
@@ -44,6 +45,7 @@ static void register_all_tools() {
     register_exec_tools();
     register_sandbox_tools();
     register_grant_tools();
+    register_user_tools();
 }
 
 static void write_pidfile(const std::string& state_dir) {
@@ -112,7 +114,8 @@ int main(int argc, char* argv[]) {
                   << "Usage:\n"
                   << "  mcp_bridge daemon [--config <path>]   Run the server (default)\n"
                   << "  mcp_bridge auth create [opts]         Create a user record\n"
-                  << "  mcp_bridge auth rotate <shortid>      Rotate a user's token\n";
+                  << "  mcp_bridge auth rotate <shortid>      Rotate a user's token\n"
+                  << "  mcp_bridge auth list [--json]         List all user records\n";
         return 0;
     }
 

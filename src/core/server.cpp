@@ -16,6 +16,7 @@ using json = nlohmann::json;
 Config* Server::s_config_ = nullptr;
 Context* Server::s_context_ = nullptr;
 GrantManager* Server::s_grants_ = nullptr;
+UserStore* Server::s_users_ = nullptr;
 
 namespace {
 std::atomic<bool> g_reload_users{false};
@@ -43,6 +44,7 @@ GrantManager::Config make_grant_cfg(const Config& c) {
 Config& Server::config() { return *s_config_; }
 Context& Server::context() { return *s_context_; }
 GrantManager& Server::grants() { return *s_grants_; }
+UserStore& Server::users() { return *s_users_; }
 
 Server::Server(const Config& config)
     : config_(config)
@@ -56,6 +58,7 @@ Server::Server(const Config& config)
     s_config_ = &config_;
     s_context_ = &context_;
     s_grants_ = &grants_;
+    s_users_ = &users_;
 }
 
 void Server::start() {

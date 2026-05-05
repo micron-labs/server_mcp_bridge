@@ -16,6 +16,7 @@ public:
     static Config& config();
     static Context& context();
     static GrantManager& grants();
+    static UserStore& users();
 
 private:
     Config config_;
@@ -29,4 +30,5 @@ private:
     static Config* s_config_;
     static Context* s_context_;
     static GrantManager* s_grants_;
+    static UserStore* s_users_;
 };

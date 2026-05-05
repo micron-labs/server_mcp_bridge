@@ -30,6 +30,7 @@ set(CORE_SOURCES
     src/cli/cli_main.cpp
     src/cli/auth_create.cpp
     src/cli/auth_rotate.cpp
+    src/cli/auth_list.cpp
     src/cli/welcome_banner.cpp
     src/registry/tool_registry.cpp
 )
@@ -44,6 +45,7 @@ set(TOOL_SOURCES
     src/tools/exec/command_ops.cpp
     src/tools/sandbox/sandbox_ops.cpp
     src/tools/admin/grant_ops.cpp
+    src/tools/admin/user_ops.cpp
 )
 
 if(WIN32)
