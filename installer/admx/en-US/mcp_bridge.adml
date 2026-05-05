@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitionResources xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions"
+                           revision="1.0" schemaVersion="1.0">
+  <displayName>MCP Bridge policies</displayName>
+  <description>Configures the MCP Bridge daemon at machine scope.</description>
+  <resources>
+    <stringTable>
+      <string id="MCPBridge_Cat">MCP Bridge</string>
+
+      <string id="ListenAddress">Daemon listen address</string>
+      <string id="ListenAddress_Help">IP or hostname the daemon binds to. Default: 127.0.0.1. Set to 0.0.0.0 for all interfaces (only with TLS + a real auth model).</string>
+
+      <string id="ListenPort">Daemon listen port</string>
+      <string id="ListenPort_Help">TCP port the daemon listens on. Default: 8080.</string>
+
+      <string id="DangerousToolsEnabled">Enable dangerous tools</string>
+      <string id="DangerousToolsEnabled_Help">If enabled, the daemon exposes tools that perform irreversible operations (firewall changes, package installs, raw SQL). Off by default.</string>
+
+      <string id="GrantTtlMaxSeconds">Maximum grant TTL (seconds)</string>
+      <string id="GrantTtlMaxSeconds_Help">Caps the time-to-live on any privileged grant the daemon will issue. Default: 86400 (24h).</string>
+    </stringTable>
+  </resources>
+</policyDefinitionResources>

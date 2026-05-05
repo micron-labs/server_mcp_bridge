@@ -94,11 +94,28 @@ jobs:
       - name: Build (Windows)
         if: runner.os == 'Windows'
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_SSL=OFF -DENABLE_MYSQL=OFF -DENABLE_POSTGRES=OFF
-          cmake --build build --config Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_SSL=OFF -DENABLE_MYSQL=OFF -DENABLE_POSTGRES=OFF "-DCMAKE_CXX_FLAGS_RELEASE=/O2 /DMCP_BRIDGE_PRODUCTION=1"
+          cmake --build build --config Release --target mcp_bridge mcp_bridge_priv
           mkdir dist
-          copy build\Release\mcp_bridge.exe dist\${{ matrix.artifact }}.exe
-          copy etc\mcp_bridge\mcp.json.template dist\
+          copy build\Release\mcp_bridge.exe       dist\${{ matrix.artifact }}.exe
+          copy build\Release\mcp_bridge_priv.exe  dist\${{ matrix.artifact }}-priv.exe
+          copy etc\mcp_bridge\mcp.json.template   dist\
+
+      - name: Generate SHA256 sidecars (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd dist
+          for f in mcp-bridge-*; do sha256sum "$f" > "$f.sha256"; done
+
+      - name: Generate SHA256 sidecars (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd dist
+          Get-ChildItem -File -Filter "*.exe" | ForEach-Object {
+            $h = (Get-FileHash -Algorithm SHA256 -Path $_.FullName).Hash.ToLower()
+            "$h  $($_.Name)" | Set-Content -Encoding ascii -NoNewline ($_.FullName + ".sha256")
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -106,9 +123,82 @@ jobs:
           name: binary-${{ matrix.artifact }}
           path: dist/
 
+  build-msi:
+    name: Build Windows MSI installer
+    needs: [build-binary]
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-mcp-bridge-windows-amd64
+          path: payload
+
+      - name: Set version from tag
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart('v')
+          "VERSION=$v" | Out-File -Append -FilePath $env:GITHUB_ENV
+          # WiX rejects leading-zero / pre-release suffixes; strip them for the
+          # ProductVersion attribute. Releases tagged v2.0.0~rc1-1 publish as
+          # MSI version 2.0.0; the suffix lives in the file name only.
+          $msi = ($v -replace '~.*$','') -replace '-.*$',''
+          "MSI_VERSION=$msi" | Out-File -Append -FilePath $env:GITHUB_ENV
+
+      - name: Build MSI
+        shell: pwsh
+        env:
+          PAYLOAD_DIR: ${{ github.workspace }}\payload
+        run: |
+          # WiX 3.x ships preinstalled on windows-latest as candle.exe / light.exe.
+          $wix = "$env:WIX\bin"
+          if (-not (Test-Path $wix)) { $wix = "C:\Program Files (x86)\WiX Toolset v3.14\bin" }
+          if (-not (Test-Path $wix)) { $wix = "C:\Program Files (x86)\WiX Toolset v3.11\bin" }
+          $env:Path = "$wix;$env:Path"
+          mkdir build-msi
+          & candle.exe -nologo "-dProductVersion=$env:MSI_VERSION" "-dPayloadDir=$env:PAYLOAD_DIR" -arch x64 -out build-msi\mcp_bridge.wixobj installer\wix\mcp_bridge.wxs
+          & light.exe -nologo -ext WixUIExtension -out "build-msi\mcp-bridge-$env:VERSION-windows-amd64.msi" build-msi\mcp_bridge.wixobj
+          mkdir dist-msi
+          copy "build-msi\mcp-bridge-$env:VERSION-windows-amd64.msi" dist-msi\
+          $msi = "dist-msi\mcp-bridge-$env:VERSION-windows-amd64.msi"
+          $h = (Get-FileHash -Algorithm SHA256 -Path $msi).Hash.ToLower()
+          "$h  $((Get-Item $msi).Name)" | Set-Content -Encoding ascii -NoNewline ($msi + ".sha256")
+
+      # Authenticode signing is gated on the SIGNING_PFX_BASE64 +
+      # SIGNING_PFX_PASSWORD repo secrets being set. Without them the MSI
+      # ships unsigned and SmartScreen will warn — see installer/release.md.
+      - name: Sign MSI (when signing cert is available)
+        if: ${{ secrets.SIGNING_PFX_BASE64 != '' }}
+        shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.SIGNING_PFX_BASE64 }}
+          PFX_PASS: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: |
+          [IO.File]::WriteAllBytes('signing.pfx', [Convert]::FromBase64String($env:PFX_B64))
+          $signtool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe"
+          if (-not (Test-Path $signtool)) {
+            $signtool = (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' | Select-Object -Last 1).FullName
+          }
+          & $signtool sign /f signing.pfx /p $env:PFX_PASS /tr http://timestamp.digicert.com /td sha256 /fd sha256 dist-msi\*.msi
+          Remove-Item signing.pfx
+          # Re-hash after signing so the sidecar matches.
+          Get-ChildItem dist-msi\*.msi | ForEach-Object {
+            $h = (Get-FileHash -Algorithm SHA256 -Path $_.FullName).Hash.ToLower()
+            "$h  $($_.Name)" | Set-Content -Encoding ascii -NoNewline ($_.FullName + ".sha256")
+          }
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: msi-windows-amd64
+          path: dist-msi/
+
   release:
     name: Create GitHub Release
-    needs: [build-deb, build-binary]
+    needs: [build-deb, build-binary, build-msi]
     runs-on: ubuntu-latest
 
     steps:
@@ -122,7 +212,16 @@ jobs:
       - name: Collect release files
         run: |
           mkdir release
-          find artifacts -type f \( -name "*.deb" -o -name "mcp-bridge-*" -o -name "*.exe" \) -exec cp {} release/ \;
+          find artifacts -type f \( \
+              -name "*.deb" -o -name "*.deb.sha256" \
+              -o -name "mcp-bridge-*" -o -name "*.exe" -o -name "*.exe.sha256" \
+              -o -name "*.msi" -o -name "*.msi.sha256" \
+           \) -exec cp {} release/ \;
+          # Generate sidecars for any .deb that didn't come with one.
+          for f in release/*.deb; do
+            [ -e "$f" ] || continue
+            [ -f "$f.sha256" ] || sha256sum "$f" > "$f.sha256"
+          done
           ls -la release/
 
       - name: Create Release
@@ -164,7 +263,40 @@ jobs:
             ./mcp-bridge-linux-amd64 daemon --config /etc/mcp_bridge/mcp.json
             ```
 
-            ### Windows
+            ### Windows (recommended: MSI)
+
+            Download `mcp-bridge-<version>-windows-amd64.msi` and run it
+            (or `msiexec /i <file>.msi /qb` for unattended). The installer
+            registers two services: `mcp-bridge` (the daemon, low priv) and
+            `mcp_bridge_priv` (LocalSystem, named-pipe RPC). The admin token
+            is generated and printed to the verbose install log on first
+            install.
+
+            > Heads-up: until an Authenticode cert is provisioned, the MSI
+            > is unsigned and SmartScreen will warn. Verify the `.sha256`
+            > sidecar against the file before running.
+
+            ### Windows (PowerShell installer)
+
+            For a curl-pipe-bash equivalent UX:
+
+            ```powershell
+            irm https://github.com/TheParadox20/server-mcp-bridge/releases/latest/download/install.ps1 | iex
+            ```
+
+            Or inspect first:
+
+            ```powershell
+            iwr -useb https://.../install.ps1 | Out-File install.ps1
+            powershell -ExecutionPolicy Bypass -File install.ps1
+            ```
+
+            ### Windows (standalone .exe)
+
+            For ad-hoc / unmanaged use, ship `mcp-bridge-windows-amd64.exe`
+            and `mcp-bridge-windows-amd64-priv.exe` together. The daemon
+            requires the priv service for any `run_command` call (the
+            named-pipe client is the gate).
 
             ```powershell
             .\mcp-bridge-windows-amd64.exe daemon --config C:\path\to\mcp.json

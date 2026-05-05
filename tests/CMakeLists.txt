@@ -9,6 +9,7 @@ set(MCP_TESTS
     test_session
     test_grant_template
     test_user_store
+    test_cron_store
 )
 
 foreach(t IN LISTS MCP_TESTS)

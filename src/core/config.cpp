@@ -62,8 +62,10 @@ Config load_config(const std::string& path) {
         const auto& p = doc["paths"];
         cfg.users_dir = str_or(p, "users_dir", cfg.users_dir);
         cfg.state_dir = str_or(p, "state_dir", cfg.state_dir);
+        cfg.users_state_dir = str_or(p, "users_state_dir", cfg.users_state_dir);
         cfg.sudoers_dir = str_or(p, "sudoers_dir", cfg.sudoers_dir);
         cfg.helper_path = str_or(p, "helper_path", cfg.helper_path);
+        cfg.cron_runner_path = str_or(p, "cron_runner_path", cfg.cron_runner_path);
     }
 
     cfg.grant_sweep_interval_seconds =
@@ -122,6 +124,12 @@ Config load_config(const std::string& path) {
         const auto& l = doc["logging"];
         cfg.log_file = str_or(l, "file", cfg.log_file);
         cfg.log_level = str_or(l, "level", cfg.log_level);
+    }
+
+    if (doc.contains("webhook") && doc["webhook"].is_object()) {
+        const auto& w = doc["webhook"];
+        cfg.webhook_url = str_or(w, "url", cfg.webhook_url);
+        cfg.webhook_secret_token = str_or(w, "secret_token", cfg.webhook_secret_token);
     }
 
     return cfg;

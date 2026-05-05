@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# mcp_bridge-cron-runner: invoked by cron as the per-tenant OS user. Reads the
+# job's metadata + the bridge's webhook config from the user's state dir, runs
+# the command, and POSTs the captured output (plus metadata) to the configured
+# webhook. Exits 0 even on webhook-delivery failure so cron stays quiet — the
+# cron line itself is not the place to surface webhook outages.
+#
+# Layout (paths must match the C++ daemon's defaults):
+#   /var/lib/mcp_bridge/users_state/$USER/runtime.json
+#       { webhook_url, webhook_secret_token }
+#   /var/lib/mcp_bridge/users_state/$USER/crons/<job_id>.json
+#       { job_id, user_id, schedule, command, description, context_id }
+
+set -u
+
+JOB_ID="${1:-}"
+if [[ -z "$JOB_ID" || ! "$JOB_ID" =~ ^[0-9a-f]{16}$ ]]; then
+    echo "usage: $0 <job_id>" >&2
+    exit 64
+fi
+
+STATE_BASE="/var/lib/mcp_bridge/users_state/${USER}"
+META_FILE="${STATE_BASE}/crons/${JOB_ID}.json"
+RT_FILE="${STATE_BASE}/runtime.json"
+
+if [[ ! -r "$META_FILE" ]]; then
+    echo "mcp_bridge-cron-runner: no metadata at $META_FILE" >&2
+    exit 65
+fi
+
+json_get() {
+    # Single-key extractor that avoids hard-depending on jq. Never fails the
+    # pipeline; missing keys yield an empty string.
+    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get(sys.argv[2],""),end="")' \
+        "$1" "$2" 2>/dev/null
+}
+
+USER_ID="$(json_get "$META_FILE" user_id)"
+SCHEDULE="$(json_get "$META_FILE" schedule)"
+COMMAND="$(json_get "$META_FILE" command)"
+DESCRIPTION="$(json_get "$META_FILE" description)"
+CONTEXT_ID="$(json_get "$META_FILE" context_id)"
+
+if [[ -z "$COMMAND" ]]; then
+    echo "mcp_bridge-cron-runner: no command in $META_FILE" >&2
+    exit 66
+fi
+
+TMPDIR_RUN="$(mktemp -d -t mcp_cron_XXXXXX)"
+trap 'rm -rf "$TMPDIR_RUN"' EXIT
+OUT="${TMPDIR_RUN}/stdout"
+ERR="${TMPDIR_RUN}/stderr"
+
+STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+bash -c "$COMMAND" >"$OUT" 2>"$ERR"
+EXIT_CODE=$?
+COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# Cap each stream at 64 KiB so a runaway job can't make webhook payloads
+# unbounded.
+truncate -s 65536 "$OUT" 2>/dev/null || true
+truncate -s 65536 "$ERR" 2>/dev/null || true
+
+WEBHOOK_URL=""
+WEBHOOK_SECRET=""
+if [[ -r "$RT_FILE" ]]; then
+    WEBHOOK_URL="$(json_get "$RT_FILE" webhook_url)"
+    WEBHOOK_SECRET="$(json_get "$RT_FILE" webhook_secret_token)"
+fi
+if [[ -z "$WEBHOOK_URL" ]]; then
+    exit 0
+fi
+
+PAYLOAD_FILE="${TMPDIR_RUN}/payload.json"
+
+# All user-controlled strings travel through env vars to dodge any quoting
+# pitfalls between bash and the python subprocess.
+export JOB_ID USER_ID SCHEDULE COMMAND DESCRIPTION CONTEXT_ID \
+       EXIT_CODE STARTED_AT COMPLETED_AT
+python3 - "$OUT" "$ERR" >"$PAYLOAD_FILE" <<'PY'
+import json, os, sys
+out_path, err_path = sys.argv[1], sys.argv[2]
+payload = {
+    "job_id":       os.environ["JOB_ID"],
+    "user_id":      os.environ.get("USER_ID", ""),
+    "description":  os.environ.get("DESCRIPTION", ""),
+    "context_id":   os.environ.get("CONTEXT_ID", ""),
+    "schedule":     os.environ.get("SCHEDULE", ""),
+    "command":      os.environ.get("COMMAND", ""),
+    "exit_code":    int(os.environ.get("EXIT_CODE", "-1")),
+    "stdout":       open(out_path, errors="replace").read(),
+    "stderr":       open(err_path, errors="replace").read(),
+    "started_at":   os.environ.get("STARTED_AT", ""),
+    "completed_at": os.environ.get("COMPLETED_AT", ""),
+}
+print(json.dumps(payload))
+PY
+
+CURL_ARGS=(--silent --show-error --max-time 30
+           --header "Content-Type: application/json"
+           --data-binary "@${PAYLOAD_FILE}")
+if [[ -n "$WEBHOOK_SECRET" ]]; then
+    CURL_ARGS+=(--header "Authorization: Bearer ${WEBHOOK_SECRET}")
+fi
+
+curl "${CURL_ARGS[@]}" "$WEBHOOK_URL" >/dev/null 2>&1 || true
+exit 0

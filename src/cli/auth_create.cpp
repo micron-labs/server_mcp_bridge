@@ -1,6 +1,7 @@
 #include "cli/welcome_banner.hpp"
 #include "core/config.hpp"
 #include "core/crypto.hpp"
+#include "core/runtime_sync.hpp"
 #include "core/shortid.hpp"
 #include <json.hpp>
 #include <spawn.h>
@@ -34,10 +35,11 @@ std::string prompt_line(const std::string& label) {
     return s;
 }
 
-int spawn_helper_useradd(const std::string& helper_path, const std::string& shortid) {
+int spawn_helper(const std::string& helper_path, const std::string& sub,
+                 const std::string& shortid) {
     char* argv_c[] = {
         const_cast<char*>(helper_path.c_str()),
-        const_cast<char*>("useradd"),
+        const_cast<char*>(sub.c_str()),
         const_cast<char*>(shortid.c_str()),
         nullptr
     };
@@ -141,12 +143,27 @@ int cli_auth_create(int argc, char** argv) {
         return 1;
     }
 
-    int rc = spawn_helper_useradd(cfg.helper_path, shortid);
+    int rc = spawn_helper(cfg.helper_path, "useradd", shortid);
     if (rc != 0 && rc != 14) {  // 14 = user already exists (idempotent)
         std::fprintf(stderr,
                      "WARNING: helper useradd returned %d; user record was written but the OS "
                      "account mcp_user_%s may not exist. Re-run as root or fix the helper at %s\n",
                      rc, shortid.c_str(), cfg.helper_path.c_str());
+    } else {
+        int st_rc = spawn_helper(cfg.helper_path, "prepare-user-state", shortid);
+        if (st_rc != 0) {
+            std::fprintf(stderr,
+                         "WARNING: helper prepare-user-state returned %d; per-user state dir "
+                         "may not be in place for mcp_user_%s\n", st_rc, shortid.c_str());
+        } else {
+            try {
+                runtime_sync::write_for_user(cfg, "mcp_user_" + shortid);
+            } catch (const std::exception& e) {
+                std::fprintf(stderr,
+                             "WARNING: could not seed runtime.json for mcp_user_%s: %s\n",
+                             shortid.c_str(), e.what());
+            }
+        }
     }
 
     try_sighup_daemon(cfg.state_dir);

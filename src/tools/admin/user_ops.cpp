@@ -1,9 +1,11 @@
 #include "tools/admin/user_ops.hpp"
 #include "core/crypto.hpp"
+#include "core/runtime_sync.hpp"
 #include "core/server.hpp"
 #include "core/shortid.hpp"
 #include "core/user_store.hpp"
 #include "registry/tool_registry.hpp"
+#include <spdlog/spdlog.h>
 #include <json.hpp>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -145,6 +147,24 @@ void register_user_tools() {
             // 14 = OS account already exists; treat as idempotent.
             bool os_provisioned = (rc == 0 || rc == 14);
 
+            int state_rc = -1;
+            bool runtime_written = false;
+            if (os_provisioned) {
+                state_rc = spawn_helper(cfg.helper_path, "prepare-user-state", shortid);
+                if (state_rc == 0) {
+                    try {
+                        runtime_sync::write_for_user(cfg, "mcp_user_" + shortid);
+                        runtime_written = true;
+                    } catch (const std::exception& e) {
+                        spdlog::warn("user_create: runtime_sync failed for {}: {}",
+                                     shortid, e.what());
+                    }
+                } else {
+                    spdlog::warn("user_create: helper prepare-user-state {} returned {}",
+                                 shortid, state_rc);
+                }
+            }
+
             Server::users().reload();
 
             return {
@@ -155,7 +175,9 @@ void register_user_tools() {
                 {"is_admin", is_admin},
                 {"token", token},
                 {"os_provisioned", os_provisioned},
-                {"helper_exit", rc}
+                {"helper_exit", rc},
+                {"state_dir_prepared", state_rc == 0},
+                {"runtime_written", runtime_written}
             };
         }
     });
@@ -225,6 +247,7 @@ void register_user_tools() {
                 throw std::runtime_error(std::string("unlink: ") + std::strerror(errno));
 
             int rc = spawn_helper(cfg.helper_path, "userdel", shortid);
+            int cleanup_rc = spawn_helper(cfg.helper_path, "cleanup-user-state", shortid);
 
             Server::users().reload();
 
@@ -232,7 +255,8 @@ void register_user_tools() {
                 {"user_id", shortid},
                 {"record_deleted", record_existed},
                 {"os_account_removed", rc == 0},
-                {"helper_exit", rc}
+                {"helper_exit", rc},
+                {"state_dir_removed", cleanup_rc == 0}
             };
         }
     });

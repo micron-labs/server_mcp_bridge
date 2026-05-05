@@ -45,3 +45,42 @@ std::string render_full_admin_spec(const std::string& shortid);
 // the per-command form or the full_admin wildcard form. Defense in depth:
 // the helper re-runs an equivalent check before writing to /etc/sudoers.d.
 bool spec_is_well_formed(const std::string& spec);
+
+// ---- Windows grant record ----------------------------------------------
+//
+// Windows has no sudoers; grants are JSON files under
+// %ProgramData%\mcp_bridge\grants\<grantid>.json that the priv service
+// consults at RunAs time. Same TTL/template/wildcard semantics as Linux.
+// `sid` is bound at issue time so a deleted-and-recreated mcp_user_<X>
+// (which would receive a fresh SID) cannot inherit old grants.
+//
+// Returns the JSON body the priv service expects; throws on bad inputs.
+//
+// Per-command record:
+//   {
+//     "grantid": "<16hex>",
+//     "shortid": "<8base32>",
+//     "sid":     "S-1-5-21-...",
+//     "template": "<template_name>",
+//     "command_pattern": "<binary> <arg> ...",
+//     "elevated": true,
+//     "expires_at": <unix-seconds>
+//   }
+//
+// full_admin record uses command_pattern="*" and elevated=true.
+json render_windows_grant_record(const std::string& grantid,
+                                 const std::string& shortid,
+                                 const std::string& sid,
+                                 const GrantTemplate& tmpl,
+                                 const json& captured_args,
+                                 int64_t expires_at);
+
+json render_windows_full_admin_record(const std::string& grantid,
+                                      const std::string& shortid,
+                                      const std::string& sid,
+                                      int64_t expires_at);
+
+// Validates the shape of a Windows grant record (the same check the priv
+// service applies before installing). Returns "" on success, an error
+// message on failure. Cross-platform — testable from Linux.
+std::string validate_grant_record(const json& record);

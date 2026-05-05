@@ -15,8 +15,10 @@
   "paths": {
     "users_dir": "/var/lib/mcp_bridge/users",
     "state_dir": "/var/lib/mcp_bridge/state",
+    "users_state_dir": "/var/lib/mcp_bridge/users_state",
     "sudoers_dir": "/etc/sudoers.d",
-    "helper_path": "/usr/lib/mcp_bridge/mcp_bridge-priv"
+    "helper_path": "/usr/lib/mcp_bridge/mcp_bridge-priv",
+    "cron_runner_path": "/usr/lib/mcp_bridge/mcp_bridge-cron-runner"
   },
 
   "grant_sweep_interval_seconds": 30,
@@ -59,6 +61,11 @@
   "logging": {
     "file": "/var/log/mcp_bridge/server.log",
     "level": "info"
+  },
+
+  "webhook": {
+    "url": "",
+    "secret_token": ""
   },
 
   "sudo_grant_templates": [

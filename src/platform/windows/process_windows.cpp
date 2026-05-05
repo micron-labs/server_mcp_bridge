@@ -1,8 +1,17 @@
 #ifdef _WIN32
 #include "platform/platform.hpp"
+#include "platform/windows/priv_client.hpp"
 #include <windows.h>
 #include <array>
 #include <sstream>
+
+// MCP_BRIDGE_PRODUCTION asserts the priv-pipe client is in this translation
+// unit. Including priv_client.hpp defines MCP_BRIDGE_PRIV_PIPE_CLIENT; the
+// assertion below is the gate. A production build that lost the include
+// would refuse to compile rather than silently ship the un-bound stubs.
+#if defined(MCP_BRIDGE_PRODUCTION) && !defined(MCP_BRIDGE_PRIV_PIPE_CLIENT)
+#error "Windows privilege drop is not implemented; not safe to ship"
+#endif
 
 ProcessResult run_process(const std::string& command, const std::string& cwd,
                           int timeout_secs, const std::map<std::string,std::string>& env) {
@@ -28,6 +37,7 @@ ProcessResult run_process(const std::string& command, const std::string& cwd,
 
     PROCESS_INFORMATION pi = {};
     std::string cmd_line = "cmd /c " + command;
+    (void)env;  // env merging on the unprivileged path is a TODO
 
     BOOL success = CreateProcessA(
         nullptr, const_cast<char*>(cmd_line.c_str()),
@@ -52,7 +62,6 @@ ProcessResult run_process(const std::string& command, const std::string& cwd,
         result.stderr_str = "Process timed out";
     }
 
-    // Read output
     std::array<char, 4096> buffer;
     DWORD bytes_read;
     while (ReadFile(read_pipe, buffer.data(), buffer.size() - 1, &bytes_read, nullptr) && bytes_read > 0) {
@@ -75,11 +84,23 @@ ProcessResult run_process_as(const std::string& os_username,
                              const std::string& cwd,
                              int timeout_secs,
                              const std::map<std::string,std::string>& env) {
-    // Privilege model on Windows differs from POSIX (CreateProcessAsUser
-    // needs a user token and LOGON_TYPE handling). Until that's wired up,
-    // run as the daemon's account.
-    (void)os_username;
-    return run_process(command, cwd, timeout_secs, env);
+    // The auth identity (`os_username` shaped like `mcp_user_<shortid>`) is
+    // enforced at exec time by the priv service. The daemon process itself
+    // never holds the user's token — that capability lives only in
+    // mcp_bridge_priv.exe.
+    ProcessResult r;
+    if (os_username.empty()) {
+        r.exit_code = -1;
+        r.stderr_str = "run_process_as: os_username is required";
+        return r;
+    }
+    std::string shortid = priv_client::shortid_from_username(os_username);
+    if (shortid.empty()) {
+        r.exit_code = -1;
+        r.stderr_str = "run_process_as: os_username must be 'mcp_user_<shortid>'";
+        return r;
+    }
+    return priv_client::run_as(shortid, command, cwd, timeout_secs, env);
 }
 
 int spawn_background(const std::string& command, const std::string& cwd) {
@@ -105,8 +126,10 @@ int spawn_background(const std::string& command, const std::string& cwd) {
 int spawn_background_as(const std::string& os_username,
                         const std::string& command,
                         const std::string& cwd) {
-    (void)os_username;
-    return spawn_background(command, cwd);
+    if (os_username.empty()) return -1;
+    std::string shortid = priv_client::shortid_from_username(os_username);
+    if (shortid.empty()) return -1;
+    return priv_client::spawn_background_as(shortid, command, cwd);
 }
 
 bool kill_process_by_pid(int pid, int /*signal*/) {
@@ -124,18 +147,16 @@ std::vector<ProcessInfo> list_processes(const std::string& filter) {
     std::istringstream stream(result.stdout_str);
     std::string line;
     while (std::getline(stream, line)) {
-        // CSV: "name","pid","session","session#","mem"
         if (line.size() < 5) continue;
         if (!filter.empty() && line.find(filter) == std::string::npos) continue;
         ProcessInfo pi{};
-        // Simple CSV parse
         size_t pos = 0;
         auto next_field = [&]() -> std::string {
             if (pos >= line.size()) return "";
             if (line[pos] == '"') {
                 auto end = line.find('"', pos + 1);
                 auto val = line.substr(pos + 1, end - pos - 1);
-                pos = end + 2; // skip closing quote and comma
+                pos = end + 2;
                 return val;
             }
             auto end = line.find(',', pos);

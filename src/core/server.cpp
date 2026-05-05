@@ -1,5 +1,6 @@
 #include "core/server.hpp"
 #include "core/auth.hpp"
+#include "core/runtime_sync.hpp"
 #include "registry/tool_registry.hpp"
 #include <httplib.h>
 #include <spdlog/spdlog.h>
@@ -17,6 +18,7 @@ Config* Server::s_config_ = nullptr;
 Context* Server::s_context_ = nullptr;
 GrantManager* Server::s_grants_ = nullptr;
 UserStore* Server::s_users_ = nullptr;
+CronStore* Server::s_crons_ = nullptr;
 
 namespace {
 std::atomic<bool> g_reload_users{false};
@@ -45,13 +47,16 @@ Config& Server::config() { return *s_config_; }
 Context& Server::context() { return *s_context_; }
 GrantManager& Server::grants() { return *s_grants_; }
 UserStore& Server::users() { return *s_users_; }
+CronStore& Server::crons() { return *s_crons_; }
 
-Server::Server(const Config& config)
+Server::Server(const Config& config, std::string config_path)
     : config_(config)
+    , config_path_(std::move(config_path))
     , users_(config.users_dir, config.global_token_salt)
     , rate_limiter_(config.rate_limit)
     , context_("context.json")
     , grants_(make_grant_cfg(config))
+    , crons_(config.state_dir)
     , sessions_(std::chrono::hours(1))
     , router_(mcp::make_default_router())
 {
@@ -59,12 +64,14 @@ Server::Server(const Config& config)
     s_context_ = &context_;
     s_grants_ = &grants_;
     s_users_ = &users_;
+    s_crons_ = &crons_;
 }
 
 void Server::start() {
     users_.load_all();
     grants_.reconcile_at_startup();
     grants_.start_sweeper();
+    crons_.load();
 
     struct sigaction sa{};
     sa.sa_handler = on_sighup;
@@ -79,9 +86,28 @@ void Server::start() {
         res.set_content("ok\n", "text/plain");
     });
 
+    auto handle_reload = [this]() {
+        if (!g_reload_users.exchange(false)) return;
+        users_.reload();
+        if (config_path_.empty()) return;
+        try {
+            Config new_cfg = load_config(config_path_);
+            bool webhook_changed =
+                (new_cfg.webhook_url != config_.webhook_url) ||
+                (new_cfg.webhook_secret_token != config_.webhook_secret_token);
+            config_ = new_cfg;
+            if (webhook_changed) {
+                spdlog::info("config reload: webhook changed, syncing per-user runtime.json");
+                runtime_sync::write_all(config_);
+            }
+        } catch (const std::exception& e) {
+            spdlog::error("config reload failed: {}", e.what());
+        }
+    };
+
     // ----- POST /  : JSON-RPC 2.0 endpoint -----
-    svr.Post("/", [this](const httplib::Request& req, httplib::Response& res) {
-        if (g_reload_users.exchange(false)) users_.reload();
+    svr.Post("/", [this, &handle_reload](const httplib::Request& req, httplib::Response& res) {
+        handle_reload();
 
         auto client_ip = req.remote_addr;
 
@@ -195,8 +221,8 @@ void Server::start() {
     });
 
     // ----- GET /  : Server-Sent Events for server→client notifications -----
-    svr.Get("/", [this](const httplib::Request& req, httplib::Response& res) {
-        if (g_reload_users.exchange(false)) users_.reload();
+    svr.Get("/", [this, &handle_reload](const httplib::Request& req, httplib::Response& res) {
+        handle_reload();
         auto client_ip = req.remote_addr;
 
         if (!is_ip_allowed(client_ip, config_.allowed_ips)) {

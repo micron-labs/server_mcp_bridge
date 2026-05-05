@@ -1,0 +1,67 @@
+name: Windows CI
+
+# Daily build of the Windows artifacts on `main` plus a per-PR sanity check —
+# catches platform regressions early instead of at tag-push time. Test step
+# runs the cross-platform unit tests (Linux-only ones are excluded by their
+# CMake guards).
+
+on:
+  schedule:
+    - cron: '0 5 * * *'   # 05:00 UTC, after typical merge windows
+  push:
+    branches: [main]
+    paths:
+      - 'CMakeLists.txt'
+      - 'src/**'
+      - 'tests/**'
+      - 'vendor/**'
+      - 'installer/wix/**'
+      - 'installer/install.ps1'
+      - '.github/workflows/windows-ci.yml'
+  pull_request:
+    paths:
+      - 'CMakeLists.txt'
+      - 'src/**'
+      - 'tests/**'
+      - 'vendor/**'
+      - 'installer/wix/**'
+      - 'installer/install.ps1'
+      - '.github/workflows/windows-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & test (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DENABLE_SSL=OFF -DENABLE_MYSQL=OFF -DENABLE_POSTGRES=OFF
+
+      - name: Build daemon + priv service
+        # MCP_BRIDGE_PRODUCTION trips the build-time guard in
+        # process_windows.cpp; if the priv-pipe client is ever lost from the
+        # link, the build fails here rather than shipping the un-bound stubs.
+        run: cmake --build build --config Release "-DCMAKE_CXX_FLAGS_RELEASE=/O2 /DMCP_BRIDGE_PRODUCTION=1"
+
+      - name: Run cross-platform unit tests
+        # The grant_template / shortid / crypto / jsonrpc / session /
+        # user_store / cron_store suites are pure C++ and run anywhere.
+        # Anything Linux-only (sudoers, setuid) is excluded by build guards.
+        run: ctest --test-dir build --output-on-failure --build-config Release
+
+      - name: Smoke check — priv service launches in console mode
+        # Boots mcp_bridge_priv.exe in --console mode on a thread, waits a
+        # second, then exits the test job. Confirms the binary at least
+        # initializes the named-pipe server without crashing.
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path build -Recurse -Filter mcp_bridge_priv.exe | Select-Object -First 1
+          if (-not $exe) { throw "mcp_bridge_priv.exe not found" }
+          $proc = Start-Process -FilePath $exe.FullName -ArgumentList '--console' -PassThru
+          Start-Sleep -Seconds 2
+          if ($proc.HasExited) { throw "priv service exited prematurely (code $($proc.ExitCode))" }
+          Stop-Process -Id $proc.Id -Force
+          Write-Host "  priv service launched and stayed up."

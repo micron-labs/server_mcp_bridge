@@ -13,7 +13,8 @@ The system runs as a single compiled binary on your server and provides:
 - Native MCP / JSON-RPC 2.0 transport with `Mcp-Session-Id` session binding
 - Per-OS-user multi-tenancy (each end user gets a `mcp_user_<shortid>` POSIX account)
 - Setuid helper for time-limited sudoers grants (admin-only)
-- Tool-based execution model (67 tools across 9 modules)
+- Tool-based execution model (71 tools across 10 modules)
+- Per-tenant scheduled jobs via the OS crontab, with completion delivered to a configured webhook
 - Context tracking
 - Logging via systemd journal + rotating file + `LOG_AUTHPRIV` audit trail
 - Per-user rate limiting
@@ -42,6 +43,7 @@ mcp_bridge/
     mcp.json.template         # Postinst-materialized config template
   installer/
     install.sh                # `curl | bash` installer
+    mcp_bridge-cron-runner    # Bash wrapper invoked by per-tenant cron lines
     release.md                # Per-release publishing checklist
   debian/                     # Debian packaging (mcp-bridge.service, postinst, …)
 
@@ -51,7 +53,7 @@ mcp_bridge/
     spdlog/                   # spdlog (logging)
 
   src/
-    main.cpp                  # argv[1] dispatch: daemon | auth …
+    main.cpp                  # argv[1] dispatch: daemon | auth | webhook …
     core/
       server.cpp/hpp          # MCP transport — POST JSON-RPC, GET SSE
       jsonrpc.cpp/hpp         # JSON-RPC 2.0 envelope
@@ -61,6 +63,8 @@ mcp_bridge/
       user_store.cpp/hpp      # /var/lib/mcp_bridge/users/*.json index
       grants.cpp/hpp          # Sudoers drop-in lifecycle
       grant_template.cpp/hpp  # Template render + spec-shape check
+      cron_store.cpp/hpp      # crons.json — ownership-checked CRUD for scheduled jobs
+      runtime_sync.cpp/hpp    # Writes per-user runtime.json (webhook URL/secret)
       crypto.cpp/hpp          # SHA-256, hex, constant-time compare
       shortid.cpp/hpp         # 8-char base32 IDs + UUID-v4
       config.cpp/hpp          # JSON config parser
@@ -69,12 +73,13 @@ mcp_bridge/
       request_context.hpp     # Per-request identity threaded into tools
       logger.cpp/hpp          # spdlog initialization
     cli/
-      cli_main.cpp/hpp        # `mcp_bridge auth …` dispatcher
+      cli_main.cpp/hpp        # `mcp_bridge auth … | webhook …` dispatcher
       auth_create.cpp         # Create user + write record + SIGHUP
       auth_rotate.cpp         # Rotate token, invalidate sessions
+      webhook_set.cpp         # `webhook set | show | clear` — edits mcp.json + SIGHUP
       welcome_banner.cpp/hpp  # /dev/tty connection block
     priv/
-      main.c                  # Setuid helper (libc only) — useradd, install/revoke-grant
+      main.c                  # Setuid helper (libc only) — useradd, grants, prepare-user-state
     registry/
       tool_registry.cpp/hpp   # Tool map, MCP-shaped inputSchema synthesis
       tool_types.hpp          # ToolDef + handler signature
@@ -87,6 +92,7 @@ mcp_bridge/
       hosting/{webserver_ops,process_mgmt}    # 11 +  3 tools
       exec/command_ops                        #  5 tools
       sandbox/sandbox_ops                     #  4 tools
+      scheduling/cron_ops                     #  4 tools
       admin/{grant_ops,user_ops}              #  2 + 3 admin-only tools
 ```
 
@@ -187,10 +193,12 @@ The JSON layout, with defaults:
                 "enable_ssl": false, "ssl_cert": "", "ssl_key": "" },
   "auth":     { "global_token_salt": "<hex>",
                 "admin_token_hash":  "<hex>" },
-  "paths":    { "users_dir":   "/var/lib/mcp_bridge/users",
-                "state_dir":   "/var/lib/mcp_bridge/state",
-                "sudoers_dir": "/etc/sudoers.d",
-                "helper_path": "/usr/lib/mcp_bridge/mcp_bridge-priv" },
+  "paths":    { "users_dir":       "/var/lib/mcp_bridge/users",
+                "state_dir":       "/var/lib/mcp_bridge/state",
+                "users_state_dir": "/var/lib/mcp_bridge/users_state",
+                "sudoers_dir":     "/etc/sudoers.d",
+                "helper_path":     "/usr/lib/mcp_bridge/mcp_bridge-priv",
+                "cron_runner_path":"/usr/lib/mcp_bridge/mcp_bridge-cron-runner" },
   "security": { "allowed_ips": [], "rate_limit": 60,
                 "allowed_root": "/",
                 "dangerous_tools_enabled": true,
@@ -207,6 +215,7 @@ The JSON layout, with defaults:
                 "enable_network": false },
   "logging":  { "file": "/var/log/mcp_bridge/server.log",
                 "level": "info" },
+  "webhook":  { "url": "", "secret_token": "" },
   "grant_sweep_interval_seconds": 30,
   "sudo_grant_templates": [ /* see Privilege escalation section */ ]
 }
@@ -237,9 +246,12 @@ Each user gets:
 - A POSIX account `mcp_user_<shortid>` (no shell, not in the sudo group).
 - A 32-byte hex bearer token, printed once on `/dev/tty`. Lost? Rotate.
 - A user record JSON file storing only the salted SHA-256 hash of the token.
+- A per-user state directory at `/var/lib/mcp_bridge/users_state/mcp_user_<shortid>/` (mode 0700, owned by the user) holding their `runtime.json` (current webhook URL/secret) and `crons/<job_id>.json` metadata files. Created by the privileged helper's `prepare-user-state` verb at provisioning time.
 
 The daemon picks up new/rotated users on `SIGHUP` (sent automatically by the
-CLI when it can read `/var/lib/mcp_bridge/state/daemon.pid`).
+CLI when it can read `/var/lib/mcp_bridge/state/daemon.pid`). The same SIGHUP
+also re-reads `webhook.url` / `webhook.secret_token` and rewrites every user's
+`runtime.json` if they changed.
 
 ---
 
@@ -347,11 +359,94 @@ operation emits a `LOG_AUTHPRIV` syslog line under the
 The admin-only HTTP tools `grant_request` and `grant_revoke` expose this
 to MCP clients.
 
+### Privilege model differences on Windows
+
+Windows has no setuid and no sudoers. The same trust property — "RCE in the
+daemon ≠ root" — is preserved by splitting the privilege surface across two
+Windows Services:
+
+- **`mcp-bridge`** runs under the virtual service account `NT SERVICE\mcp_bridge`
+  (low privilege, no admin rights).
+- **`mcp_bridge_priv`** runs under `LocalSystem` and exposes the privileged
+  ops over a named pipe at `\\.\pipe\mcp_bridge_priv`. The pipe DACL only
+  admits the daemon's service SID.
+
+Grants on Windows are JSON files under `%ProgramData%\mcp_bridge\grants\<grantid>.json`.
+Each record binds the grant to the user's **SID** captured at issue time —
+on Windows, account names can be reused with a fresh SID, so SID binding
+closes the "deleted-and-recreated user inherits old grant" footgun.
+
+The `grant_request` admin tool is identical on both platforms; the renderer
+is platform-aware (`render_sudoers_spec` on Linux, `render_windows_grant_record`
+on Windows).
+
+When a grant matches a `run_command` invocation, the priv service spawns the
+command with `LocalSystem`'s primary token. **"Elevated" on Windows means
+`Administrators`-equivalent, not "root"** — the audit log still names the
+bound user as the principal, but the executing token is `LocalSystem`'s.
+Audit events go to the Windows Event Log under source `MCP-Bridge-Priv`.
+
+---
+
+## Webhook delivery
+
+Async results from scheduled jobs (today: cron) are delivered out-of-band to
+a single bridge-wide webhook. The URL and an optional bearer secret are
+configured at the bridge level and copied into each user's `runtime.json`
+(mode 0600, owned by the user's OS account) so the per-tenant cron wrapper
+can read them as that user without needing daemon round-trips.
+
+Set the URL and secret either by editing `mcp.json` directly (the `webhook`
+block) or via the CLI:
+
+```bash
+sudo mcp_bridge webhook set --url https://example.com/hook --secret <token>
+sudo mcp_bridge webhook show
+sudo mcp_bridge webhook clear
+```
+
+`webhook set` atomically rewrites `mcp.json` and SIGHUPs the daemon, which
+re-syncs every user's `runtime.json`. New users created after the change pick
+up the current values automatically.
+
+### Payload shape
+
+When a cron run completes, the wrapper POSTs a JSON body:
+
+```jsonc
+{
+  "job_id":       "<16 hex>",
+  "user_id":      "<8-char shortid>",
+  "description":  "Hourly cleanup",
+  "context_id":   "ctx-abc-123",
+  "schedule":     "0 * * * *",
+  "command":      "rm -rf /tmp/scratch/*",
+  "exit_code":    0,
+  "stdout":       "...",     // capped at 64 KiB
+  "stderr":       "...",     // capped at 64 KiB
+  "started_at":   "2026-05-05T10:00:00Z",
+  "completed_at": "2026-05-05T10:00:02Z"
+}
+```
+
+Headers:
+
+- `Content-Type: application/json`
+- `Authorization: Bearer <secret_token>` — only if `webhook.secret_token` is set
+
+If `webhook.url` is empty, scheduled jobs still run but the wrapper exits
+silently after the command completes (no POST is attempted).
+
+The wrapper uses `curl --max-time 30` and treats webhook delivery failures as
+non-fatal — the cron line itself isn't the place to surface webhook outages.
+A receiver that wants reliable delivery should ack with 2xx and queue
+internally.
+
 ---
 
 ## Available Tools
 
-67 tools across 9 modules.
+71 tools across 10 modules.
 
 ### Data — Files (12 tools)
 
@@ -451,6 +546,21 @@ The `server` argument auto-detects between `"nginx"` and `"apache"` if omitted.
 | `list_background` | | | List managed background processes |
 | `kill_background` | `pid` | `signal` | Kill background process |
 | `get_output` | `pid` | `lines` | Get background process output |
+
+### Scheduling — Cron Jobs (4 tools)
+
+| Tool | Required Args | Optional Args | Description |
+|------|--------------|---------------|-------------|
+| `cron_create` | `schedule`, `command` | `description`, `context_id` | Schedule a recurring command on the user's OS crontab. Each run posts captured stdout/stderr/exit_code + metadata to the bridge webhook. |
+| `cron_list`   | | | List the bound user's cron jobs. |
+| `cron_update` | `job_id` | `schedule`, `command`, `description`, `context_id` | Update any subset of fields on an existing job. |
+| `cron_delete` | `job_id` | | Remove a cron job from both the crontab and metadata store. |
+
+`schedule` is a standard 5-field cron expression (minute hour day-of-month month day-of-week). Allowed characters per field: digits, `*`, `/`, `,`, `-` — anything else (whitespace beyond field separators, shell metacharacters, etc.) is rejected before the line ever reaches the crontab.
+
+Each user can only see and mutate their own jobs; ownership is enforced against the request's bound `os_username`.
+
+A wrapper script ([`/usr/lib/mcp_bridge/mcp_bridge-cron-runner`](installer/mcp_bridge-cron-runner)) replaces the user's command in the crontab line. Cron invokes the wrapper; the wrapper runs the user's command, captures up to 64 KiB of each stream, and POSTs the result + metadata to the configured webhook (see [Webhook delivery](#webhook-delivery)).
 
 ### Sandboxed Code Execution (4 tools)
 
@@ -688,7 +798,7 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Six binaries cover the load-bearing modules:
+Seven binaries cover the load-bearing modules:
 
 | Binary                | Cases | Covers                                                                                |
 |-----------------------|-------|---------------------------------------------------------------------------------------|
@@ -698,6 +808,7 @@ Six binaries cover the load-bearing modules:
 | `test_session`        |  7    | Issue + validate, cross-bearer rejection, idle expiry, last-seen extension, rotation  |
 | `test_grant_template` | 18    | Template parse, regex/charset rejection, rendered spec shape (visudo gate, defense)   |
 | `test_user_store`     |  5    | Empty/missing dir, load + lookup, reload picks up + drops users, malformed file skip  |
+| `test_cron_store`     |  8    | Schedule validation (incl. shell-injection rejection), CRUD, ownership enforcement, persistence across reload |
 
 End-to-end tests against a running daemon are not part of `ctest`; they live
 in the project's verification scripts and require launching the binary with

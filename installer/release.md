@@ -48,7 +48,36 @@ are configured. After that lands, users can:
     curl -s https://packagecloud.io/install/repositories/<owner>/<repo>/script.deb.sh | sudo bash
     sudo apt install mcp-bridge
 
-## 6. Smoke test
+## 6. Windows artifacts
+
+The `release.yml` workflow also produces:
+
+- `mcp-bridge-windows-amd64.exe` + `.sha256` — daemon, standalone use.
+- `mcp-bridge-windows-amd64-priv.exe` + `.sha256` — priv service, paired with the daemon.
+- `mcp-bridge-<version>-windows-amd64.msi` + `.sha256` — installer (built by the `build-msi` job, WiX 3.x).
+
+The MSI registers two services:
+
+- `mcp-bridge` under `NT SERVICE\mcp-bridge` (low-priv, the daemon).
+- `mcp_bridge_priv` under `LocalSystem` (the priv service).
+
+### Code signing
+
+Without a signing cert, SmartScreen warns on every install. To enable
+Authenticode signing of the MSI in CI:
+
+1. Acquire an EV (or OV) Authenticode cert (.pfx).
+2. Add two repo secrets:
+   - `SIGNING_PFX_BASE64` — base64-encoded `.pfx`
+   - `SIGNING_PFX_PASSWORD` — its password
+3. The `build-msi` job's `Sign MSI` step picks them up automatically; the
+   `.sha256` sidecar is regenerated post-signing so it matches the signed
+   file.
+
+Until the cert is in place, document the SmartScreen warning prominently in
+release notes.
+
+## 7. Smoke test
 
 On a fresh container of each supported distro:
 

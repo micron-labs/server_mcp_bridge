@@ -18,8 +18,10 @@ struct Config {
     // Paths
     std::string users_dir = "/var/lib/mcp_bridge/users";
     std::string state_dir = "/var/lib/mcp_bridge/state";
+    std::string users_state_dir = "/var/lib/mcp_bridge/users_state";
     std::string sudoers_dir = "/etc/sudoers.d";
     std::string helper_path = "/usr/lib/mcp_bridge/mcp_bridge-priv";
+    std::string cron_runner_path = "/usr/lib/mcp_bridge/mcp_bridge-cron-runner";
     int grant_sweep_interval_seconds = 30;
 
     // Sudoers grant templates (rendered by daemon, installed via setuid helper)
@@ -58,6 +60,10 @@ struct Config {
     // Logging
     std::string log_file = "/var/log/mcp_bridge/server.log";
     std::string log_level = "info";
+
+    // Webhook (bridge-wide, copied per-user into runtime.json)
+    std::string webhook_url;
+    std::string webhook_secret_token;
 };
 
 Config load_config(const std::string& path = "/etc/mcp_bridge/mcp.json");

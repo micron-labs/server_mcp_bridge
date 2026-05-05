@@ -13,6 +13,7 @@
 #include "tools/hosting/process_mgmt.hpp"
 #include "tools/exec/command_ops.hpp"
 #include "tools/sandbox/sandbox_ops.hpp"
+#include "tools/scheduling/cron_ops.hpp"
 #include "tools/admin/grant_ops.hpp"
 #include "tools/admin/user_ops.hpp"
 
@@ -44,6 +45,7 @@ static void register_all_tools() {
     register_process_tools();
     register_exec_tools();
     register_sandbox_tools();
+    register_cron_tools();
     register_grant_tools();
     register_user_tools();
 }
@@ -90,13 +92,14 @@ static int run_daemon(int argc, char** argv) {
 
     write_pidfile(config.state_dir);
 
-    Server server(config);
+    Server server(config, config_path);
     server.start();
     return 0;
 }
 
 int main(int argc, char* argv[]) {
-    if (argc >= 2 && std::strcmp(argv[1], "auth") == 0) {
+    if (argc >= 2 && (std::strcmp(argv[1], "auth") == 0 ||
+                      std::strcmp(argv[1], "webhook") == 0)) {
         return cli_main(argc, argv);
     }
 
@@ -115,7 +118,10 @@ int main(int argc, char* argv[]) {
                   << "  mcp_bridge daemon [--config <path>]   Run the server (default)\n"
                   << "  mcp_bridge auth create [opts]         Create a user record\n"
                   << "  mcp_bridge auth rotate <shortid>      Rotate a user's token\n"
-                  << "  mcp_bridge auth list [--json]         List all user records\n";
+                  << "  mcp_bridge auth list [--json]         List all user records\n"
+                  << "  mcp_bridge webhook set --url <url>    Set webhook URL/secret\n"
+                  << "  mcp_bridge webhook show               Show current webhook config\n"
+                  << "  mcp_bridge webhook clear              Clear webhook URL/secret\n";
         return 0;
     }
 

@@ -23,6 +23,8 @@ set(CORE_SOURCES
     src/core/user_store.cpp
     src/core/grant_template.cpp
     src/core/grants.cpp
+    src/core/cron_store.cpp
+    src/core/runtime_sync.cpp
     src/core/jsonrpc.cpp
     src/core/mcp_router.cpp
     src/core/session.cpp
@@ -31,6 +33,7 @@ set(CORE_SOURCES
     src/cli/auth_create.cpp
     src/cli/auth_rotate.cpp
     src/cli/auth_list.cpp
+    src/cli/webhook_set.cpp
     src/cli/welcome_banner.cpp
     src/registry/tool_registry.cpp
 )
@@ -44,6 +47,7 @@ set(TOOL_SOURCES
     src/tools/hosting/process_mgmt.cpp
     src/tools/exec/command_ops.cpp
     src/tools/sandbox/sandbox_ops.cpp
+    src/tools/scheduling/cron_ops.cpp
     src/tools/admin/grant_ops.cpp
     src/tools/admin/user_ops.cpp
 )
@@ -54,6 +58,7 @@ if(WIN32)
         src/platform/windows/firewall_windows.cpp
         src/platform/windows/sandbox_windows.cpp
         src/platform/windows/service_windows.cpp
+        src/platform/windows/priv_client.cpp
     )
 else()
     set(PLATFORM_SOURCES
@@ -78,7 +83,7 @@ target_include_directories(mcp_bridge_core PUBLIC
 set_target_properties(mcp_bridge_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(WIN32)
-    target_link_libraries(mcp_bridge_core PUBLIC ws2_32 iphlpapi)
+    target_link_libraries(mcp_bridge_core PUBLIC ws2_32 iphlpapi advapi32)
 else()
     target_link_libraries(mcp_bridge_core PUBLIC pthread)
 endif()
@@ -132,11 +137,36 @@ if(NOT WIN32)
     target_link_options(mcp_bridge PRIVATE -static-libgcc -static-libstdc++)
 endif()
 
-# ----- Privileged helper (Linux only) -----
+# ----- Privileged helper -----
+# Linux: setuid C helper (mcp_bridge-priv).
+# Windows: separate Service binary (mcp_bridge_priv.exe) that talks to the
+#          daemon over a named pipe with an ACL gated on the daemon's SID.
 if(NOT WIN32)
     add_executable(mcp_bridge-priv src/priv/main.c)
     set_target_properties(mcp_bridge-priv PROPERTIES C_STANDARD 11)
     target_compile_options(mcp_bridge-priv PRIVATE -Wall -Wextra -Wpedantic)
+else()
+    add_executable(mcp_bridge_priv
+        src/priv_win/main.cpp
+        src/priv_win/operations.cpp
+        src/priv_win/audit.cpp
+    )
+    target_include_directories(mcp_bridge_priv PRIVATE
+        ${CMAKE_SOURCE_DIR}/vendor
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    # Win32 libraries the priv service needs:
+    #   advapi32 — LSA private data, RegisterEventSource, ACL, SetNamedSecurityInfo
+    #   netapi32 — NetUserAdd / NetUserDel
+    #   userenv  — CreateEnvironmentBlock / DestroyEnvironmentBlock
+    #   secur32  — Lsa* import surface (some toolchains route through here)
+    target_link_libraries(mcp_bridge_priv PRIVATE
+        advapi32 netapi32 userenv secur32)
+    if(MSVC)
+        target_compile_options(mcp_bridge_priv PRIVATE /W4)
+    else()
+        target_compile_options(mcp_bridge_priv PRIVATE -Wall -Wextra)
+    endif()
 endif()
 
 # ----- Tests -----

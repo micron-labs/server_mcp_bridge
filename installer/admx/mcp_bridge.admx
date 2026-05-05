@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Group Policy template for centrally deploying MCP Bridge configuration.
+  Drops policy-controlled values under
+    HKLM\SOFTWARE\Policies\MCP-Bridge\
+  which the daemon reads in preference to the per-machine mcp.json values.
+
+  Install:
+    Copy mcp_bridge.admx → %SystemRoot%\PolicyDefinitions\
+    Copy en-US\mcp_bridge.adml → %SystemRoot%\PolicyDefinitions\en-US\
+
+  After install, the policies appear under
+    Computer Configuration → Administrative Templates → MCP Bridge.
+
+  Settings here are advisory until the daemon's config loader is taught to
+  read them. See TASKS_WINDOWS.md Phase 6.4.
+-->
+<policyDefinitions xmlns="http://schemas.microsoft.com/GroupPolicy/2006/07/PolicyDefinitions"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   revision="1.0" schemaVersion="1.0">
+  <policyNamespaces>
+    <target prefix="mcpb" namespace="MCPBridge.Policies" />
+    <using  prefix="windows" namespace="Microsoft.Policies.Windows" />
+  </policyNamespaces>
+
+  <resources minRequiredRevision="1.0" />
+
+  <categories>
+    <category name="MCPBridge_Cat" displayName="$(string.MCPBridge_Cat)" />
+  </categories>
+
+  <policies>
+    <policy name="ListenAddress"
+            class="Machine"
+            displayName="$(string.ListenAddress)"
+            explainText="$(string.ListenAddress_Help)"
+            key="SOFTWARE\Policies\MCP-Bridge"
+            valueName="ListenAddress">
+      <parentCategory ref="MCPBridge_Cat" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <elements>
+        <text id="ListenAddress" valueName="ListenAddress" required="true" />
+      </elements>
+    </policy>
+
+    <policy name="ListenPort"
+            class="Machine"
+            displayName="$(string.ListenPort)"
+            explainText="$(string.ListenPort_Help)"
+            key="SOFTWARE\Policies\MCP-Bridge"
+            valueName="ListenPort">
+      <parentCategory ref="MCPBridge_Cat" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <elements>
+        <decimal id="ListenPort" valueName="ListenPort" minValue="1" maxValue="65535" />
+      </elements>
+    </policy>
+
+    <policy name="DangerousToolsEnabled"
+            class="Machine"
+            displayName="$(string.DangerousToolsEnabled)"
+            explainText="$(string.DangerousToolsEnabled_Help)"
+            key="SOFTWARE\Policies\MCP-Bridge"
+            valueName="DangerousToolsEnabled">
+      <parentCategory ref="MCPBridge_Cat" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+
+    <policy name="GrantTtlMaxSeconds"
+            class="Machine"
+            displayName="$(string.GrantTtlMaxSeconds)"
+            explainText="$(string.GrantTtlMaxSeconds_Help)"
+            key="SOFTWARE\Policies\MCP-Bridge"
+            valueName="GrantTtlMaxSeconds">
+      <parentCategory ref="MCPBridge_Cat" />
+      <supportedOn ref="windows:SUPPORTED_Windows7" />
+      <elements>
+        <decimal id="GrantTtlMaxSeconds" valueName="GrantTtlMaxSeconds" minValue="60" maxValue="86400" />
+      </elements>
+    </policy>
+  </policies>
+</policyDefinitions>

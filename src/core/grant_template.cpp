@@ -156,6 +156,135 @@ std::string render_full_admin_spec(const std::string& shortid) {
     return "mcp_user_" + shortid + " ALL=(ALL) NOPASSWD: ALL\n";
 }
 
+namespace {
+
+bool valid_grantid_hex(const std::string& s) {
+    if (s.size() != 16) return false;
+    for (char c : s) {
+        bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        if (!ok) return false;
+    }
+    return true;
+}
+
+// Lightweight sanity check on a SID string. We don't try to parse the
+// full SDDL grammar — just that it looks like `S-1-5-...`.
+bool plausible_sid(const std::string& s) {
+    if (s.size() < 6 || s.size() > 256) return false;
+    if (s[0] != 'S' && s[0] != 's') return false;
+    if (s[1] != '-' || s[2] != '1' || s[3] != '-') return false;
+    for (char c : s) {
+        bool ok = (c >= '0' && c <= '9') || c == 'S' || c == 's' || c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+json render_windows_grant_record(const std::string& grantid,
+                                 const std::string& shortid,
+                                 const std::string& sid,
+                                 const GrantTemplate& tmpl,
+                                 const json& captured_args,
+                                 int64_t expires_at) {
+    if (!valid_grantid_hex(grantid))
+        throw std::runtime_error("grant_template: invalid grantid");
+    if (!valid_shortid(shortid))
+        throw std::runtime_error("grant_template: invalid shortid");
+    if (!sid.empty() && !plausible_sid(sid))
+        throw std::runtime_error("grant_template: malformed sid");
+
+    // Reuse the per-command renderer for the command_pattern body — same
+    // charset checks apply, so a malicious template author can't slip
+    // metacharacters past validate_captured_args.
+    std::string command = render_command(tmpl, captured_args);
+    json record = {
+        {"grantid", grantid},
+        {"shortid", shortid},
+        {"sid", sid},
+        {"template", tmpl.name},
+        {"command_pattern", command},
+        {"elevated", true},
+        {"expires_at", expires_at}
+    };
+    auto err = validate_grant_record(record);
+    if (!err.empty()) throw std::runtime_error("grant_template: " + err);
+    return record;
+}
+
+json render_windows_full_admin_record(const std::string& grantid,
+                                      const std::string& shortid,
+                                      const std::string& sid,
+                                      int64_t expires_at) {
+    if (!valid_grantid_hex(grantid))
+        throw std::runtime_error("grant_template: invalid grantid");
+    if (!valid_shortid(shortid))
+        throw std::runtime_error("grant_template: invalid shortid");
+    if (!sid.empty() && !plausible_sid(sid))
+        throw std::runtime_error("grant_template: malformed sid");
+
+    json record = {
+        {"grantid", grantid},
+        {"shortid", shortid},
+        {"sid", sid},
+        {"template", kFullAdminTemplate},
+        {"command_pattern", "*"},
+        {"elevated", true},
+        {"expires_at", expires_at}
+    };
+    auto err = validate_grant_record(record);
+    if (!err.empty()) throw std::runtime_error("grant_template: " + err);
+    return record;
+}
+
+std::string validate_grant_record(const json& record) {
+    if (!record.is_object()) return "record must be a JSON object";
+
+    auto sval = [&](const char* k) -> std::string {
+        if (!record.contains(k)) return "";
+        if (!record[k].is_string()) return "";
+        return record[k].get<std::string>();
+    };
+
+    if (!valid_grantid_hex(sval("grantid"))) return "invalid or missing grantid";
+    if (!valid_shortid(sval("shortid"))) return "invalid or missing shortid";
+
+    // SID may be empty in test contexts; if present, sanity-check it.
+    std::string sid = sval("sid");
+    if (!sid.empty() && !plausible_sid(sid)) return "malformed sid";
+
+    std::string tmpl = sval("template");
+    if (tmpl.empty() || tmpl.size() > 32) return "missing template";
+
+    std::string pat = sval("command_pattern");
+    if (pat.empty() || pat.size() > 4096) return "missing command_pattern";
+    if (pat.find('\0') != std::string::npos) return "command_pattern has NUL";
+    if (pat.find('\n') != std::string::npos) return "command_pattern has newline";
+
+    if (!record.contains("elevated") || !record["elevated"].is_boolean())
+        return "missing elevated";
+
+    if (record.contains("expires_at") && !record["expires_at"].is_number_integer())
+        return "expires_at must be integer";
+
+    // V1 matching: only `*` (wildcard) or an absolute path is allowed.
+    if (pat != "*") {
+        // First non-space char must be `/` (POSIX abs) or `<letter>:` (Windows abs).
+        auto first_non_space = pat.find_first_not_of(' ');
+        if (first_non_space == std::string::npos) return "command_pattern empty";
+        char c = pat[first_non_space];
+        bool posix_abs = (c == '/');
+        bool win_abs   = (pat.size() > first_non_space + 2 &&
+                          ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) &&
+                          pat[first_non_space + 1] == ':' &&
+                          (pat[first_non_space + 2] == '\\' ||
+                           pat[first_non_space + 2] == '/'));
+        if (!posix_abs && !win_abs) return "command_pattern must be absolute or '*'";
+    }
+    return "";
+}
+
 bool spec_is_well_formed(const std::string& spec) {
     // Single line + trailing newline, < 4 KiB.
     if (spec.empty() || spec.size() > 4096) return false;

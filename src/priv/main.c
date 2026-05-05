@@ -21,6 +21,11 @@
 //       fixed filename keeps it out of the runtime grant reconciler's scope.
 //   revoke-system-admin
 //       unlinks /etc/sudoers.d/mcp_system_admin. Idempotent.
+//   prepare-user-state <shortid>
+//       creates /var/lib/mcp_bridge/users_state/mcp_user_<shortid>/ and a
+//       crons/ subdir, chown'd to the target user and mode 0700. Idempotent.
+//   cleanup-user-state <shortid>
+//       removes /var/lib/mcp_bridge/users_state/mcp_user_<shortid>/. Idempotent.
 //
 // Exit codes:
 //   0   success
@@ -36,6 +41,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pwd.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -51,6 +57,10 @@
 
 #ifndef MCP_SUDOERS_DIR
 #define MCP_SUDOERS_DIR "/etc/sudoers.d"
+#endif
+
+#ifndef MCP_USERS_STATE_DIR
+#define MCP_USERS_STATE_DIR "/var/lib/mcp_bridge/users_state"
 #endif
 
 extern char** environ;
@@ -332,6 +342,84 @@ static int cmd_revoke_system_admin(int argc, char** argv) {
     return 11;
 }
 
+// mkdir + chown + chmod, idempotent on EEXIST. Returns 0 on success, -1 on err.
+static int ensure_owned_dir(const char* path, uid_t uid, gid_t gid, mode_t mode) {
+    if (mkdir(path, mode) != 0 && errno != EEXIST) {
+        fprintf(stderr, "mkdir %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    if (chown(path, uid, gid) != 0) {
+        fprintf(stderr, "chown %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    if (chmod(path, mode) != 0) {
+        fprintf(stderr, "chmod %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+static int cmd_prepare_user_state(int argc, char** argv) {
+    if (argc != 1 || !valid_shortid(argv[0])) {
+        fprintf(stderr, "usage: mcp_bridge-priv prepare-user-state <shortid>\n");
+        return 10;
+    }
+    char username[32];
+    snprintf(username, sizeof(username), "mcp_user_%s", argv[0]);
+
+    // Resolve target uid/gid via getpwnam_r.
+    char buf[1024];
+    struct passwd pw;
+    struct passwd* result = NULL;
+    int rc = getpwnam_r(username, &pw, buf, sizeof(buf), &result);
+    if (rc != 0 || !result) {
+        fprintf(stderr, "getpwnam_r %s: %s\n", username,
+                rc != 0 ? strerror(rc) : "not found");
+        return 12;
+    }
+    uid_t uid = pw.pw_uid;
+    gid_t gid = pw.pw_gid;
+
+    // Ensure top-level users_state dir exists (root:mcp 0755 — but we may not
+    // know the mcp gid here, so leave existing perms intact if it exists).
+    if (mkdir(MCP_USERS_STATE_DIR, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "mkdir %s: %s\n", MCP_USERS_STATE_DIR, strerror(errno));
+        return 11;
+    }
+
+    char user_dir[256], crons_dir[256];
+    snprintf(user_dir,  sizeof(user_dir),  "%s/%s",        MCP_USERS_STATE_DIR, username);
+    snprintf(crons_dir, sizeof(crons_dir), "%s/%s/crons",  MCP_USERS_STATE_DIR, username);
+
+    if (ensure_owned_dir(user_dir,  uid, gid, 0700) != 0) return 11;
+    if (ensure_owned_dir(crons_dir, uid, gid, 0700) != 0) return 11;
+    return 0;
+}
+
+static int cmd_cleanup_user_state(int argc, char** argv) {
+    if (argc != 1 || !valid_shortid(argv[0])) {
+        fprintf(stderr, "usage: mcp_bridge-priv cleanup-user-state <shortid>\n");
+        return 10;
+    }
+    char user_dir[256];
+    snprintf(user_dir, sizeof(user_dir), "%s/mcp_user_%s",
+             MCP_USERS_STATE_DIR, argv[0]);
+
+    // Idempotent: if it doesn't exist, we're done.
+    struct stat st;
+    if (lstat(user_dir, &st) != 0) {
+        if (errno == ENOENT) return 0;
+        fprintf(stderr, "lstat %s: %s\n", user_dir, strerror(errno));
+        return 11;
+    }
+
+    char* a[] = {"rm", "-rf", "--", user_dir, NULL};
+    int rc = run("/usr/bin/rm", a);
+    if (rc == 0) return 0;
+    fprintf(stderr, "rm -rf %s exit=%d\n", user_dir, rc);
+    return 11;
+}
+
 int main(int argc, char** argv) {
     // Strip inherited environment; rebuild a minimal one for our own children.
     static char path_env[] = "PATH=/usr/sbin:/usr/bin:/sbin:/bin";
@@ -352,6 +440,8 @@ int main(int argc, char** argv) {
     if (strcmp(argv[1], "revoke-grant") == 0)         return cmd_revoke_grant(argc - 2, argv + 2);
     if (strcmp(argv[1], "install-system-admin") == 0) return cmd_install_system_admin(argc - 2, argv + 2);
     if (strcmp(argv[1], "revoke-system-admin") == 0)  return cmd_revoke_system_admin(argc - 2, argv + 2);
+    if (strcmp(argv[1], "prepare-user-state") == 0)   return cmd_prepare_user_state(argc - 2, argv + 2);
+    if (strcmp(argv[1], "cleanup-user-state") == 0)   return cmd_cleanup_user_state(argc - 2, argv + 2);
 
     fprintf(stderr, "unknown subcommand: %s\n", argv[1]);
     return 10;

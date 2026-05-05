@@ -1,20 +1,28 @@
 #include "core/grants.hpp"
 #include <spdlog/spdlog.h>
-#include <dirent.h>
-#include <fcntl.h>
-#include <spawn.h>
-#include <sys/wait.h>
-#include <syslog.h>
-#include <unistd.h>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <random>
 #include <stdexcept>
 
+#ifdef _WIN32
+#  include "platform/windows/priv_client.hpp"
+#  include <windows.h>
+#else
+#  include <dirent.h>
+#  include <fcntl.h>
+#  include <spawn.h>
+#  include <sys/wait.h>
+#  include <syslog.h>
+#  include <unistd.h>
 extern char** environ;
+#endif
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -47,37 +55,66 @@ int64_t now_seconds() {
 }
 
 void atomic_write(const std::string& path, const std::string& data) {
-    std::string tmp = path + ".tmp." + std::to_string(::getpid());
-    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0640);
-    if (fd < 0) throw std::runtime_error("open " + tmp + ": " + std::strerror(errno));
-    ssize_t off = 0;
-    while (off < (ssize_t)data.size()) {
-        ssize_t n = ::write(fd, data.data() + off, data.size() - off);
-        if (n < 0) { ::close(fd); ::unlink(tmp.c_str()); throw std::runtime_error("write"); }
-        off += n;
+    // std::filesystem-based atomic write. Works on POSIX and Windows.
+    std::error_code ec;
+    fs::create_directories(fs::path(path).parent_path(), ec);
+    std::string tmp = path + ".tmp." +
+#ifdef _WIN32
+        std::to_string(GetCurrentProcessId());
+#else
+        std::to_string(::getpid());
+#endif
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f.is_open()) throw std::runtime_error("open " + tmp);
+        f.write(data.data(), static_cast<std::streamsize>(data.size()));
+        f.flush();
+        if (!f.good()) {
+            fs::remove(tmp, ec);
+            throw std::runtime_error("write " + tmp);
+        }
     }
-    if (::fsync(fd) != 0) {
-        ::close(fd); ::unlink(tmp.c_str());
-        throw std::runtime_error("fsync");
-    }
-    ::close(fd);
-    if (::rename(tmp.c_str(), path.c_str()) != 0) {
-        ::unlink(tmp.c_str());
-        throw std::runtime_error("rename to " + path + ": " + std::strerror(errno));
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        // POSIX rename(2) replaces atomically. std::filesystem::rename does on
+        // POSIX too. On Windows, fs::rename fails if the destination exists,
+        // so fall back to remove+rename.
+        fs::remove(path, ec);
+        fs::rename(tmp, path, ec);
+        if (ec) {
+            fs::remove(tmp, ec);
+            throw std::runtime_error("rename to " + path + ": " + ec.message());
+        }
     }
 }
 
-std::vector<std::string> sudoers_dropins(const std::string& dir) {
+// Lists existing grant ids on disk. On Linux these are sudoers drop-ins
+// (/etc/sudoers.d/mcp_grant_<grantid>). On Windows they are JSON files
+// (grants_dir/<grantid>.json).
+std::vector<std::string> on_disk_grants(const std::string& dir) {
     std::vector<std::string> out;
+#ifdef _WIN32
+    std::error_code ec;
+    if (!fs::exists(dir, ec)) return out;
+    for (auto& e : fs::directory_iterator(dir, ec)) {
+        if (ec) break;
+        if (!e.is_regular_file()) continue;
+        auto stem = e.path().stem().string();
+        if (e.path().extension() == ".json" && stem.size() == 16) {
+            out.push_back(stem);
+        }
+    }
+#else
     DIR* d = ::opendir(dir.c_str());
     if (!d) return out;
     while (auto* e = ::readdir(d)) {
         std::string n = e->d_name;
         if (n.compare(0, 10, "mcp_grant_") == 0 && n.size() == 10 + 16) {
-            out.push_back(n.substr(10));  // the grantid
+            out.push_back(n.substr(10));
         }
     }
     ::closedir(d);
+#endif
     return out;
 }
 
@@ -136,6 +173,7 @@ void GrantManager::persist_state_locked() {
     atomic_write(config_.state_dir + "/grants.json", arr.dump(2) + "\n");
 }
 
+#ifndef _WIN32
 int GrantManager::spawn_helper(const std::vector<std::string>& argv,
                                std::string& stderr_out) const {
     int err_pipe[2];
@@ -183,9 +221,43 @@ int GrantManager::spawn_helper(const std::vector<std::string>& argv,
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     return -1;
 }
+#else
+int GrantManager::spawn_helper(const std::vector<std::string>&,
+                               std::string& stderr_out) const {
+    // The Windows priv service uses a named pipe, not a subprocess. Callers
+    // (install_grant_via_helper / revoke_grant_via_helper) take the Windows
+    // branch directly; this stub exists only so the symbol resolves on
+    // Windows.
+    stderr_out = "spawn_helper not used on Windows";
+    return -1;
+}
+#endif
 
 int GrantManager::install_grant_via_helper(const Grant& g, const std::string& spec,
                                            std::string& err) const {
+#ifdef _WIN32
+    // On Windows `spec` carries the JSON record (we abuse the parameter so
+    // the caller signature stays identical). Hand it to the priv service.
+    (void)spec;  // unused; the record came in via g.captured_args + render
+    json record;
+    try {
+        record = json::parse(spec);
+    } catch (const std::exception& e) {
+        err = std::string("grants: invalid Windows record JSON: ") + e.what();
+        return -1;
+    }
+    json req = {
+        {"op", "install_grant"},
+        {"grantid", g.grantid},
+        {"record", record}
+    };
+    json resp = priv_client::call(req);
+    if (!resp.value("ok", false)) {
+        err = resp.value("error", "priv install_grant failed");
+        return 1;
+    }
+    return 0;
+#else
     std::string spec_path = config_.state_dir + "/grant_" + g.grantid + ".spec";
     try {
         atomic_write(spec_path, spec);
@@ -200,16 +272,38 @@ int GrantManager::install_grant_via_helper(const Grant& g, const std::string& sp
     }
     ::unlink(spec_path.c_str());
     return 0;
+#endif
 }
 
 int GrantManager::revoke_grant_via_helper(const std::string& grantid,
                                           std::string& err) const {
+#ifdef _WIN32
+    json req = {
+        {"op", "revoke_grant"},
+        {"grantid", grantid}
+    };
+    json resp = priv_client::call(req);
+    if (!resp.value("ok", false)) {
+        err = resp.value("error", "priv revoke_grant failed");
+        return 1;
+    }
+    return 0;
+#else
     return spawn_helper({config_.helper_path, "revoke-grant", grantid}, err);
+#endif
 }
 
 void GrantManager::log_audit(const std::string& event, const RequestContext& ctx,
                              const std::string& grantid,
                              const std::string& detail) const {
+#ifdef _WIN32
+    // Windows audit goes through the priv service's Event Log writer (the
+    // daemon doesn't have rights to register an event source). Logging here
+    // is best-effort spdlog; the priv service is the authoritative audit
+    // surface for actually-installed grants.
+    spdlog::info("audit event={} grantid={} by={} ip={} {}",
+                 event, grantid, ctx.user_id, ctx.client_ip, detail);
+#else
     static bool opened = false;
     if (!opened) {
         ::openlog("mcp-bridge-sudoers", LOG_PID, LOG_AUTHPRIV);
@@ -218,6 +312,7 @@ void GrantManager::log_audit(const std::string& event, const RequestContext& ctx
     ::syslog(LOG_NOTICE, "event=%s grantid=%s by=%s ip=%s %s",
              event.c_str(), grantid.c_str(),
              ctx.user_id.c_str(), ctx.client_ip.c_str(), detail.c_str());
+#endif
 }
 
 Grant GrantManager::request_grant(const RequestContext& ctx,
@@ -229,7 +324,40 @@ Grant GrantManager::request_grant(const RequestContext& ctx,
         throw std::runtime_error("grants: ttl must be between 1 and 86400 seconds");
     }
 
+    Grant g;
+    g.grantid = make_grantid();
+    g.shortid = shortid;
+    g.template_name = template_name;
+    g.captured_args = captured_args;
+    g.expires_at = now_seconds() + ttl.count();
+
+    // Render the platform-specific payload that the helper / priv service
+    // will consume. On Linux, that's a sudoers Cmnd_Spec line; on Windows,
+    // a JSON grant record (passed through the same `spec` parameter so the
+    // helper signatures stay platform-neutral).
     std::string spec;
+#ifdef _WIN32
+    // The SID is empty here; the priv service fills it in via its own
+    // LookupAccountName call when it persists the grant. The renderer
+    // accepts an empty sid because validate_grant_record permits it.
+    json record;
+    if (template_name == kFullAdminTemplate) {
+        record = render_windows_full_admin_record(g.grantid, shortid, "", g.expires_at);
+    } else {
+        const GrantTemplate* tmpl = nullptr;
+        for (const auto& t : config_.templates) {
+            if (t.name == template_name) { tmpl = &t; break; }
+        }
+        if (!tmpl) throw std::runtime_error("grants: unknown template '" + template_name + "'");
+        record = render_windows_grant_record(g.grantid, shortid, "",
+                                             *tmpl, captured_args, g.expires_at);
+    }
+    auto verr = validate_grant_record(record);
+    if (!verr.empty()) {
+        throw std::runtime_error("grants: " + verr);
+    }
+    spec = record.dump();
+#else
     if (template_name == kFullAdminTemplate) {
         spec = render_full_admin_spec(shortid);
     } else {
@@ -243,13 +371,7 @@ Grant GrantManager::request_grant(const RequestContext& ctx,
     if (!spec_is_well_formed(spec)) {
         throw std::runtime_error("grants: rendered spec failed shape check");
     }
-
-    Grant g;
-    g.grantid = make_grantid();
-    g.shortid = shortid;
-    g.template_name = template_name;
-    g.captured_args = captured_args;
-    g.expires_at = now_seconds() + ttl.count();
+#endif
 
     {
         std::lock_guard lk(mutex_);
@@ -319,7 +441,7 @@ void GrantManager::sweep_expired() {
 }
 
 void GrantManager::reconcile_at_startup() {
-    auto on_disk = sudoers_dropins(config_.sudoers_dir);
+    auto on_disk = on_disk_grants(config_.sudoers_dir);
     std::vector<std::string> to_remove_from_disk;
     std::vector<std::string> to_remove_from_state;
     auto now = now_seconds();

@@ -22,6 +22,11 @@ override_dh_auto_install:
 	install -D -m 0750 obj-*/mcp_bridge-priv \
 		debian/mcp-bridge/usr/lib/mcp_bridge/mcp_bridge-priv
 
+	# Cron-job runner — invoked by per-tenant crontab entries to capture output
+	# and POST it to the configured webhook.
+	install -D -m 0755 installer/mcp_bridge-cron-runner \
+		debian/mcp-bridge/usr/lib/mcp_bridge/mcp_bridge-cron-runner
+
 	# Install JSON config template (postinst materializes /etc/mcp_bridge/mcp.json from this)
 	install -D -m 644 etc/mcp_bridge/mcp.json.template \
 		debian/mcp-bridge/usr/share/mcp_bridge/mcp.json.template
@@ -31,6 +36,9 @@ override_dh_auto_install:
 	install -d -m 750 debian/mcp-bridge/var/lib/mcp_bridge
 	install -d -m 750 debian/mcp-bridge/var/lib/mcp_bridge/users
 	install -d -m 750 debian/mcp-bridge/var/lib/mcp_bridge/state
+	# users_state is 0755 so the priv helper can chdir into it; per-user
+	# subdirs the helper creates inside are 0700 owned by mcp_user_<shortid>.
+	install -d -m 0755 debian/mcp-bridge/var/lib/mcp_bridge/users_state
 	install -d -m 750 debian/mcp-bridge/var/log/mcp_bridge
 
 override_dh_fixperms:

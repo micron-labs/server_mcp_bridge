@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX 3.x manifest for mcp_bridge.
+
+  Build: candle.exe -dProductVersion=X.Y.Z -dPayloadDir=<path> -arch x64 mcp_bridge.wxs
+         light.exe  -ext WixUIExtension -out mcp-bridge-X.Y.Z-windows-amd64.msi mcp_bridge.wixobj
+
+  Two services are registered:
+   - mcp_bridge      under NT SERVICE\mcp_bridge   (low priv, the daemon)
+   - mcp_bridge_priv under LocalSystem             (the priv service)
+
+  The daemon's virtual service account is auto-created by the SCM the first
+  time it starts; no separate user provisioning step is needed for that
+  account specifically. The install-time admin (mcpadmin) is provisioned by
+  a custom action that invokes mcp_bridge.exe's CLI.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <Product Id="*"
+           Name="MCP Bridge"
+           Language="1033"
+           Version="$(var.ProductVersion)"
+           Manufacturer="MCP Bridge"
+           UpgradeCode="9b8a3a2c-0c2c-4e9a-8a7c-0c2c4e9a8a7c">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="MCP Bridge — JSON-RPC server for AI tool dispatch"
+             Manufacturer="MCP Bridge" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- ===================== Layout ===================== -->
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="mcp_bridge">
+
+          <Component Id="cmpDaemon" Guid="*" Win64="yes">
+            <File Id="filDaemon"
+                  Name="mcp_bridge.exe"
+                  Source="$(var.PayloadDir)\mcp-bridge-windows-amd64.exe"
+                  KeyPath="yes" />
+            <ServiceInstall Id="svcDaemon"
+                            Type="ownProcess"
+                            Name="mcp-bridge"
+                            DisplayName="MCP Bridge"
+                            Description="MCP Bridge — JSON-RPC server for AI tool dispatch."
+                            Start="auto"
+                            Account="NT SERVICE\mcp-bridge"
+                            ErrorControl="normal"
+                            Arguments="daemon --config &quot;[CommonAppDataFolder]mcp_bridge\mcp.json&quot;"
+                            Vital="yes" />
+            <ServiceControl Id="svcDaemonCtl"
+                            Stop="both"
+                            Remove="uninstall"
+                            Name="mcp-bridge"
+                            Wait="yes" />
+          </Component>
+
+          <Component Id="cmpPriv" Guid="*" Win64="yes">
+            <File Id="filPriv"
+                  Name="mcp_bridge_priv.exe"
+                  Source="$(var.PayloadDir)\mcp-bridge-windows-amd64-priv.exe"
+                  KeyPath="yes" />
+            <ServiceInstall Id="svcPriv"
+                            Type="ownProcess"
+                            Name="mcp_bridge_priv"
+                            DisplayName="MCP Bridge Privileged Service"
+                            Description="Performs privileged operations on behalf of the MCP Bridge daemon over a SID-restricted named pipe."
+                            Start="auto"
+                            Account="LocalSystem"
+                            ErrorControl="normal"
+                            Vital="yes" />
+            <ServiceControl Id="svcPrivCtl"
+                            Stop="both"
+                            Start="install"
+                            Remove="uninstall"
+                            Name="mcp_bridge_priv"
+                            Wait="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+
+      <!-- Per-machine config + state lives under %ProgramData% so the
+           daemon's low-priv service account can read its config without
+           needing per-user paths. -->
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="DataDir" Name="mcp_bridge">
+
+          <!-- Template config; only created if mcp.json doesn't already exist
+               (NeverOverwrite). Token/salt/admin provisioning is done by the
+               PostInstall custom action, not by the file itself. -->
+          <Component Id="cmpConfigTemplate" Guid="*" Win64="yes" NeverOverwrite="yes">
+            <File Id="filConfigTemplate"
+                  Name="mcp.json.template"
+                  Source="$(var.PayloadDir)\mcp.json.template"
+                  KeyPath="yes" />
+          </Component>
+
+          <Directory Id="GrantsDir" Name="grants">
+            <Component Id="cmpGrantsDir" Guid="*" Win64="yes" KeyPath="yes">
+              <CreateFolder>
+                <util:PermissionEx User="SYSTEM"  GenericAll="yes" />
+                <util:PermissionEx User="Administrators" GenericAll="yes" />
+              </CreateFolder>
+            </Component>
+          </Directory>
+
+          <Directory Id="StateDir" Name="state">
+            <Component Id="cmpStateDir" Guid="*" Win64="yes" KeyPath="yes">
+              <CreateFolder>
+                <util:PermissionEx User="SYSTEM"  GenericAll="yes" />
+                <util:PermissionEx User="Administrators" GenericAll="yes" />
+              </CreateFolder>
+            </Component>
+          </Directory>
+
+          <Directory Id="UsersDir" Name="users">
+            <Component Id="cmpUsersDir" Guid="*" Win64="yes" KeyPath="yes">
+              <CreateFolder>
+                <util:PermissionEx User="SYSTEM"  GenericAll="yes" />
+                <util:PermissionEx User="Administrators" GenericAll="yes" />
+              </CreateFolder>
+            </Component>
+          </Directory>
+
+          <Directory Id="LogsDir" Name="logs">
+            <Component Id="cmpLogsDir" Guid="*" Win64="yes" KeyPath="yes">
+              <CreateFolder>
+                <util:PermissionEx User="SYSTEM"  GenericAll="yes" />
+                <util:PermissionEx User="Administrators" GenericAll="yes" />
+              </CreateFolder>
+            </Component>
+          </Directory>
+
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Main" Title="MCP Bridge" Level="1">
+      <ComponentRef Id="cmpDaemon" />
+      <ComponentRef Id="cmpPriv" />
+      <ComponentRef Id="cmpConfigTemplate" />
+      <ComponentRef Id="cmpGrantsDir" />
+      <ComponentRef Id="cmpStateDir" />
+      <ComponentRef Id="cmpUsersDir" />
+      <ComponentRef Id="cmpLogsDir" />
+    </Feature>
+
+    <!-- ===================== Custom action: postinst-analog =====================
+         Generates salt + admin token, writes mcp.json, registers system_admin
+         grant for `mcpadmin`. Runs deferred-with-no-impersonation so it has
+         the privileges to write to %ProgramData% and call the priv service.
+         install.ps1 is the on-disk twin of this logic; both should stay in
+         sync — see installer/install.ps1.
+    -->
+    <Property Id="POWERSHELL_EXE" Value="powershell.exe" />
+    <CustomAction Id="caPostInstall"
+                  Property="POWERSHELL_EXE"
+                  ExeCommand='-NoProfile -ExecutionPolicy Bypass -Command "&amp; { . \"[INSTALLDIR]postinstall.ps1\" -InstallDir \"[INSTALLDIR]\" -DataDir \"[CommonAppDataFolder]mcp_bridge\\\" }"'
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- After services are started but before the dialog closes. -->
+      <Custom Action="caPostInstall" After="StartServices">NOT REMOVE</Custom>
+    </InstallExecuteSequence>
+
+    <UI>
+      <UIRef Id="WixUI_InstallDir" />
+      <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
+    </UI>
+
+  </Product>
+</Wix>
