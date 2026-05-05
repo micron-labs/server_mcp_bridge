@@ -32,6 +32,16 @@ std::string render_sudoers_spec(const std::string& shortid,
                                 const GrantTemplate& tmpl,
                                 const json& captured_args);
 
-// Charset / shape check on the spec the helper will install. Defense in
-// depth: the helper re-runs this before writing to /etc/sudoers.d.
+// Reserved template name. Bypasses the per-command argv/params machinery and
+// emits an unrestricted sudoers line. Issuance must be gated by an admin role
+// check at the call site (see tools/admin/grant_ops.cpp).
+constexpr const char* kFullAdminTemplate = "full_admin";
+
+// Build `mcp_user_<shortid> ALL=(ALL) NOPASSWD: ALL\n`. The bound user can
+// then sudo any command for the grant's TTL.
+std::string render_full_admin_spec(const std::string& shortid);
+
+// Charset / shape check on the spec the helper will install. Accepts either
+// the per-command form or the full_admin wildcard form. Defense in depth:
+// the helper re-runs an equivalent check before writing to /etc/sudoers.d.
 bool spec_is_well_formed(const std::string& spec);

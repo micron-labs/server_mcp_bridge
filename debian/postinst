@@ -64,6 +64,24 @@ case "$1" in
         if [ -x /usr/lib/mcp_bridge/mcp_bridge-priv ]; then
             chown root:mcp /usr/lib/mcp_bridge/mcp_bridge-priv
             chmod 4750     /usr/lib/mcp_bridge/mcp_bridge-priv
+
+            # Provision the ephemeral OS account that the install admin token
+            # binds to (see auth.cpp), and install its wildcard sudoers entry.
+            # Both subcommands are idempotent across re-runs of postinst.
+            #   useradd rc 14 = "user already exists" -> treat as success.
+            set +e
+            /usr/lib/mcp_bridge/mcp_bridge-priv useradd mcpadmin
+            rc=$?
+            set -e
+            if [ "$rc" != 0 ] && [ "$rc" != 14 ]; then
+                echo "WARNING: provisioning mcp_user_mcpadmin failed (rc=$rc);" >&2
+                echo "         the install admin token will have no sudo authority." >&2
+                echo "         Re-run: sudo /usr/lib/mcp_bridge/mcp_bridge-priv useradd mcpadmin" >&2
+            else
+                if ! /usr/lib/mcp_bridge/mcp_bridge-priv install-system-admin mcpadmin; then
+                    echo "WARNING: install-system-admin failed; admin sudo not configured." >&2
+                fi
+            fi
         fi
 
         # Non-secret motd (admin token NEVER goes here — it's printed once on /dev/tty above).

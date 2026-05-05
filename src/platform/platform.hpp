@@ -37,7 +37,27 @@ struct SandboxCapabilities {
 // Process management
 ProcessResult run_process(const std::string& command, const std::string& cwd = "",
                           int timeout_secs = 0, const std::map<std::string,std::string>& env = {});
+
+// Same as run_process but executes the command as `os_username` (must exist
+// in /etc/passwd). The daemon needs CAP_SETUID and CAP_SETGID to drop into
+// the target uid/gid. On Linux: forks, looks up the target via getpwnam,
+// initgroups + setgid + setuid in the child, then execve's /bin/sh -c.
+// Returns ProcessResult.exit_code = -1 with an error in stderr_str if the
+// privilege drop fails. On Windows this is currently equivalent to
+// run_process (privilege model differs).
+ProcessResult run_process_as(const std::string& os_username,
+                             const std::string& command,
+                             const std::string& cwd = "",
+                             int timeout_secs = 0,
+                             const std::map<std::string,std::string>& env = {});
+
 int spawn_background(const std::string& command, const std::string& cwd = "");
+
+// Same as spawn_background but the child is reparented and exec'd as
+// `os_username`. Returns pid on success, -1 on fork/lookup failure.
+int spawn_background_as(const std::string& os_username,
+                        const std::string& command,
+                        const std::string& cwd = "");
 bool kill_process_by_pid(int pid, int signal = 15);
 std::vector<ProcessInfo> list_processes(const std::string& filter = "");
 ProcessInfo get_process_info(int pid);

@@ -229,13 +229,17 @@ Grant GrantManager::request_grant(const RequestContext& ctx,
         throw std::runtime_error("grants: ttl must be between 1 and 86400 seconds");
     }
 
-    const GrantTemplate* tmpl = nullptr;
-    for (const auto& t : config_.templates) {
-        if (t.name == template_name) { tmpl = &t; break; }
+    std::string spec;
+    if (template_name == kFullAdminTemplate) {
+        spec = render_full_admin_spec(shortid);
+    } else {
+        const GrantTemplate* tmpl = nullptr;
+        for (const auto& t : config_.templates) {
+            if (t.name == template_name) { tmpl = &t; break; }
+        }
+        if (!tmpl) throw std::runtime_error("grants: unknown template '" + template_name + "'");
+        spec = render_sudoers_spec(shortid, *tmpl, captured_args);
     }
-    if (!tmpl) throw std::runtime_error("grants: unknown template '" + template_name + "'");
-
-    std::string spec = render_sudoers_spec(shortid, *tmpl, captured_args);
     if (!spec_is_well_formed(spec)) {
         throw std::runtime_error("grants: rendered spec failed shape check");
     }

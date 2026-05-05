@@ -15,10 +15,24 @@ Restart=on-failure
 RestartSec=5
 
 # Security hardening
-NoNewPrivileges=yes
+#
+# NoNewPrivileges is intentionally NOT set: the daemon spawns the setuid
+# helper /usr/lib/mcp_bridge/mcp_bridge-priv (mode 4750 root:mcp) for
+# privileged operations (useradd, install/revoke sudoers drop-ins), and
+# tool calls drop privileges to per-session mcp_user_<shortid> accounts
+# which then invoke sudo against grants in /etc/sudoers.d. NoNewPrivileges
+# would mask the setuid bit on the helper *and* on sudo, breaking both.
+#
+# AmbientCapabilities gives the daemon (running as `mcp`) the ability to
+# setuid/setgid down to the per-session user before exec'ing tool commands.
+# CapabilityBoundingSet caps what the daemon can ever hold, even via the
+# setuid helper, to the same minimum.
+AmbientCapabilities=CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/mcp_bridge /var/log/mcp_bridge
+ReadWritePaths=/var/lib/mcp_bridge /var/log/mcp_bridge /etc/sudoers.d
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

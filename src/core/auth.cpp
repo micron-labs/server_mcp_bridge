@@ -48,6 +48,12 @@ std::optional<RequestContext> auth_resolve(const std::string& auth_header,
         crypto::constant_time_equal(computed, admin_token_hash_hex)) {
         RequestContext ctx;
         ctx.user_id = "admin";
+        // Bind to the install-time ephemeral OS account provisioned by
+        // postinst (`mcp_bridge-priv useradd mcpadmin` +
+        // `install-system-admin mcpadmin`). The install admin therefore
+        // executes tool calls as mcp_user_mcpadmin, which holds a wildcard
+        // sudoers entry in /etc/sudoers.d/mcp_system_admin.
+        ctx.os_username = "mcp_user_mcpadmin";
         ctx.is_admin = true;
         ctx.bearer_hash = computed;
         ctx.client_ip = client_ip;

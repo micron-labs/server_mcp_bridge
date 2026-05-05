@@ -25,7 +25,7 @@ void register_exec_tools() {
     reg.register_tool("run_command", {
         "", "Execute a shell command and return output",
         {"command"}, {"cwd", "timeout", "env"},
-        [](const RequestContext&, const json& args) -> json {
+        [](const RequestContext& ctx, const json& args) -> json {
             std::string cmd = args["command"];
             std::string cwd = args.value("cwd", "");
             int timeout = args.value("timeout", 60);
@@ -37,10 +37,20 @@ void register_exec_tools() {
                 }
             }
 
-            spdlog::info("Executing: {}", cmd);
-            auto result = run_process(cmd, cwd, timeout, env);
+            // Tool calls must execute as the bound per-session OS user,
+            // not as the daemon (`mcp`). The daemon UID has no sudoers
+            // entry by design — only mcp_user_<shortid> accounts do.
+            if (ctx.os_username.empty()) {
+                throw std::runtime_error(
+                    "run_command: request has no bound os_username; "
+                    "the auth identity cannot execute commands");
+            }
+
+            spdlog::info("Executing as {}: {}", ctx.os_username, cmd);
+            auto result = run_process_as(ctx.os_username, cmd, cwd, timeout, env);
             return {
                 {"command", cmd},
+                {"run_as", ctx.os_username},
                 {"exit_code", result.exit_code},
                 {"stdout", result.stdout_str},
                 {"stderr", result.stderr_str}
@@ -51,16 +61,20 @@ void register_exec_tools() {
     reg.register_tool("run_background", {
         "", "Start a command as a background process",
         {"command"}, {"cwd", "env", "name"},
-        [](const RequestContext&, const json& args) -> json {
+        [](const RequestContext& ctx, const json& args) -> json {
             std::string cmd = args["command"];
             std::string cwd = args.value("cwd", "");
             std::string name = args.value("name", cmd.substr(0, 30));
 
-            // Create output file for capturing
+            if (ctx.os_username.empty()) {
+                throw std::runtime_error(
+                    "run_background: request has no bound os_username");
+            }
+
             std::string output_file = "/tmp/mcp_bg_" + std::to_string(std::hash<std::string>{}(cmd)) + ".log";
             std::string full_cmd = cmd + " > " + output_file + " 2>&1";
 
-            int pid = spawn_background(full_cmd, cwd);
+            int pid = spawn_background_as(ctx.os_username, full_cmd, cwd);
             if (pid < 0) throw std::runtime_error("Failed to spawn background process");
 
             {
@@ -68,8 +82,8 @@ void register_exec_tools() {
                 bg_procs[pid] = {pid, name, cmd, output_file};
             }
 
-            spdlog::info("Background process started: pid={} cmd={}", pid, cmd);
-            return {{"pid", pid}, {"name", name}, {"command", cmd}};
+            spdlog::info("Background process started as {}: pid={} cmd={}", ctx.os_username, pid, cmd);
+            return {{"pid", pid}, {"name", name}, {"command", cmd}, {"run_as", ctx.os_username}};
         }
     });
 

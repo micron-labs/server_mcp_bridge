@@ -3,8 +3,14 @@ set -e
 
 case "$1" in
     purge)
-        # Remove sudoers drop-ins issued by the daemon
+        # Remove sudoers drop-ins issued by the daemon and at install time
         rm -f /etc/sudoers.d/mcp_grant_*
+        rm -f /etc/sudoers.d/mcp_system_admin
+
+        # Remove the install-time admin's ephemeral OS account
+        if getent passwd mcp_user_mcpadmin >/dev/null 2>&1; then
+            deluser --remove-home mcp_user_mcpadmin || true
+        fi
 
         # Remove config, logs, state, motd
         rm -rf /etc/mcp_bridge

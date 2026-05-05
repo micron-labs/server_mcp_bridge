@@ -132,4 +132,29 @@ TEST(spec_well_formed_rejects_command_not_absolute) {
     ASSERT(!spec_is_well_formed(spec));
 }
 
+TEST(render_full_admin_spec_emits_wildcard_line) {
+    auto spec = render_full_admin_spec("abc23456");
+    ASSERT_EQ(spec, std::string("mcp_user_abc23456 ALL=(ALL) NOPASSWD: ALL\n"));
+}
+
+TEST(render_full_admin_spec_rejects_bad_shortid) {
+    ASSERT_THROWS(render_full_admin_spec("BAD"));
+    ASSERT_THROWS(render_full_admin_spec("abc12def"));  // '1' invalid
+}
+
+TEST(spec_well_formed_accepts_full_admin) {
+    ASSERT(spec_is_well_formed(render_full_admin_spec("abc23456")));
+}
+
+TEST(spec_well_formed_rejects_full_admin_with_trailing_garbage) {
+    std::string spec = "mcp_user_abc23456 ALL=(ALL) NOPASSWD: ALL extra\n";
+    ASSERT(!spec_is_well_formed(spec));
+}
+
+TEST(spec_well_formed_rejects_wildcard_with_root_runas) {
+    // Only ALL=(ALL) is accepted for the wildcard form.
+    std::string spec = "mcp_user_abc23456 ALL=(root) NOPASSWD: ALL\n";
+    ASSERT(!spec_is_well_formed(spec));
+}
+
 TEST_MAIN

@@ -14,6 +14,13 @@
 //       on it, then atomic-renames into /etc/sudoers.d/mcp_grant_<grantid>.
 //   revoke-grant <grantid>
 //       unlinks /etc/sudoers.d/mcp_grant_<grantid>. Idempotent.
+//   install-system-admin <shortid>
+//       writes a fixed `mcp_user_<shortid> ALL=(ALL) NOPASSWD: ALL` line into
+//       /etc/sudoers.d/mcp_system_admin. Idempotent (overwrites). Used by
+//       postinst to grant the install-time admin its sudo authority. The
+//       fixed filename keeps it out of the runtime grant reconciler's scope.
+//   revoke-system-admin
+//       unlinks /etc/sudoers.d/mcp_system_admin. Idempotent.
 //
 // Exit codes:
 //   0   success
@@ -137,9 +144,27 @@ static int spec_well_formed(const char* buf, size_t len) {
         int ok = (c >= 'a' && c <= 'z') || (c >= '2' && c <= '7');
         if (!ok) return 0;
     }
-    static const char mid[] = " ALL=(root) NOPASSWD: /";
-    if (memcmp(buf + strlen(prefix_a) + 8, mid, strlen(mid)) != 0) return 0;
-    return 1;
+
+    size_t after_id = strlen(prefix_a) + 8;
+
+    // Per-command form: `... NOPASSWD: /<absolute-path>`. visudo -cf is the
+    // authoritative validator for the trailing command spec.
+    static const char path_mid[] = " ALL=(root) NOPASSWD: /";
+    if (len - after_id >= strlen(path_mid) &&
+        memcmp(buf + after_id, path_mid, strlen(path_mid)) == 0) {
+        return 1;
+    }
+
+    // full_admin form: exact wildcard, no command path. Reserved for the
+    // top-tier admin grant; visudo will accept it and the kernel will allow
+    // any sudo invocation by the bound mcp_user_<shortid>.
+    static const char wildcard_tail[] = " ALL=(ALL) NOPASSWD: ALL\n";
+    if (len == after_id + strlen(wildcard_tail) &&
+        memcmp(buf + after_id, wildcard_tail, strlen(wildcard_tail)) == 0) {
+        return 1;
+    }
+
+    return 0;
 }
 
 static int cmd_install_grant(int argc, char** argv) {
@@ -236,6 +261,77 @@ static int cmd_revoke_grant(int argc, char** argv) {
     return 11;
 }
 
+static int cmd_install_system_admin(int argc, char** argv) {
+    if (argc != 1 || !valid_shortid(argv[0])) {
+        fprintf(stderr, "usage: mcp_bridge-priv install-system-admin <shortid>\n");
+        return 10;
+    }
+
+    // Build the wildcard spec inline. Same shape spec_well_formed accepts.
+    char spec[64];
+    int n = snprintf(spec, sizeof(spec),
+                     "mcp_user_%s ALL=(ALL) NOPASSWD: ALL\n", argv[0]);
+    if (n <= 0 || (size_t)n >= sizeof(spec)) return 11;
+    if (!spec_well_formed(spec, (size_t)n)) {
+        fprintf(stderr, "internal: rendered spec failed shape check\n");
+        return 13;
+    }
+
+    char tmp_path[256], final_path[256];
+    snprintf(tmp_path, sizeof(tmp_path),   "%s/.mcp_system_admin.tmp", MCP_SUDOERS_DIR);
+    snprintf(final_path, sizeof(final_path),"%s/mcp_system_admin",      MCP_SUDOERS_DIR);
+
+    int wfd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0440);
+    if (wfd < 0) {
+        fprintf(stderr, "open %s: %s\n", tmp_path, strerror(errno));
+        return 11;
+    }
+    ssize_t off = 0;
+    while (off < n) {
+        ssize_t w = write(wfd, spec + off, (size_t)(n - off));
+        if (w < 0) { close(wfd); unlink(tmp_path); return 11; }
+        off += w;
+    }
+    if (fsync(wfd) != 0) { close(wfd); unlink(tmp_path); return 11; }
+    close(wfd);
+
+    if (chown(tmp_path, 0, 0) != 0) {
+        unlink(tmp_path);
+        fprintf(stderr, "chown %s: %s\n", tmp_path, strerror(errno));
+        return 11;
+    }
+
+    char* a[] = {"visudo", "-cf", tmp_path, NULL};
+    int rc = run("/usr/sbin/visudo", a);
+    if (rc != 0) {
+        unlink(tmp_path);
+        fprintf(stderr, "visudo -cf failed (exit=%d)\n", rc);
+        return 13;
+    }
+
+    // Idempotent: rename overwrites an existing target on POSIX.
+    if (rename(tmp_path, final_path) != 0) {
+        unlink(tmp_path);
+        fprintf(stderr, "rename %s -> %s: %s\n", tmp_path, final_path, strerror(errno));
+        return 11;
+    }
+    return 0;
+}
+
+static int cmd_revoke_system_admin(int argc, char** argv) {
+    (void)argv;
+    if (argc != 0) {
+        fprintf(stderr, "usage: mcp_bridge-priv revoke-system-admin\n");
+        return 10;
+    }
+    char path[256];
+    snprintf(path, sizeof(path), "%s/mcp_system_admin", MCP_SUDOERS_DIR);
+    if (unlink(path) == 0) return 0;
+    if (errno == ENOENT) return 0;
+    fprintf(stderr, "unlink %s: %s\n", path, strerror(errno));
+    return 11;
+}
+
 int main(int argc, char** argv) {
     // Strip inherited environment; rebuild a minimal one for our own children.
     static char path_env[] = "PATH=/usr/sbin:/usr/bin:/sbin:/bin";
@@ -250,10 +346,12 @@ int main(int argc, char** argv) {
         return 10;
     }
 
-    if (strcmp(argv[1], "useradd") == 0)       return cmd_useradd(argc - 2, argv + 2);
-    if (strcmp(argv[1], "userdel") == 0)       return cmd_userdel(argc - 2, argv + 2);
-    if (strcmp(argv[1], "install-grant") == 0) return cmd_install_grant(argc - 2, argv + 2);
-    if (strcmp(argv[1], "revoke-grant") == 0)  return cmd_revoke_grant(argc - 2, argv + 2);
+    if (strcmp(argv[1], "useradd") == 0)              return cmd_useradd(argc - 2, argv + 2);
+    if (strcmp(argv[1], "userdel") == 0)              return cmd_userdel(argc - 2, argv + 2);
+    if (strcmp(argv[1], "install-grant") == 0)        return cmd_install_grant(argc - 2, argv + 2);
+    if (strcmp(argv[1], "revoke-grant") == 0)         return cmd_revoke_grant(argc - 2, argv + 2);
+    if (strcmp(argv[1], "install-system-admin") == 0) return cmd_install_system_admin(argc - 2, argv + 2);
+    if (strcmp(argv[1], "revoke-system-admin") == 0)  return cmd_revoke_system_admin(argc - 2, argv + 2);
 
     fprintf(stderr, "unknown subcommand: %s\n", argv[1]);
     return 10;

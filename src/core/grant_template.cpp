@@ -149,6 +149,13 @@ std::string render_sudoers_spec(const std::string& shortid,
            render_command(tmpl, captured_args) + "\n";
 }
 
+std::string render_full_admin_spec(const std::string& shortid) {
+    if (!valid_shortid(shortid)) {
+        throw std::runtime_error("grant_template: invalid shortid '" + shortid + "'");
+    }
+    return "mcp_user_" + shortid + " ALL=(ALL) NOPASSWD: ALL\n";
+}
+
 bool spec_is_well_formed(const std::string& spec) {
     // Single line + trailing newline, < 4 KiB.
     if (spec.empty() || spec.size() > 4096) return false;
@@ -161,7 +168,7 @@ bool spec_is_well_formed(const std::string& spec) {
         if (c < 0x20 || c > 0x7e) return false;
     }
 
-    // Shape: must start with `mcp_user_<8 charset chars> ALL=(root) NOPASSWD: /`
+    // Prefix + shortid: shared between both accepted forms.
     static const std::string prefix_a = "mcp_user_";
     if (spec.compare(0, prefix_a.size(), prefix_a) != 0) return false;
     if (spec.size() < prefix_a.size() + 8) return false;
@@ -170,8 +177,23 @@ bool spec_is_well_formed(const std::string& spec) {
         bool ok = (c >= 'a' && c <= 'z') || (c >= '2' && c <= '7');
         if (!ok) return false;
     }
-    static const std::string mid = " ALL=(root) NOPASSWD: /";
-    if (spec.compare(prefix_a.size() + 8, mid.size(), mid) != 0) return false;
 
-    return true;
+    const size_t after_id = prefix_a.size() + 8;
+
+    // Per-command form: `... NOPASSWD: /<absolute-path>`. visudo -cf is the
+    // authoritative validator for the trailing command spec.
+    static const std::string path_mid = " ALL=(root) NOPASSWD: /";
+    if (spec.size() - after_id >= path_mid.size() &&
+        spec.compare(after_id, path_mid.size(), path_mid) == 0) {
+        return true;
+    }
+
+    // full_admin form: must match exactly, no trailing command path.
+    static const std::string wildcard_tail = " ALL=(ALL) NOPASSWD: ALL\n";
+    if (spec.size() == after_id + wildcard_tail.size() &&
+        spec.compare(after_id, wildcard_tail.size(), wildcard_tail) == 0) {
+        return true;
+    }
+
+    return false;
 }

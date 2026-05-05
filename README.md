@@ -15,20 +15,20 @@ The system runs as a single compiled binary on your server and provides:
 - Setuid helper for time-limited sudoers grants (admin-only)
 - Tool-based execution model (64 tools across 9 modules)
 - Context tracking
-- Logging (console + rotating file)
-- Rate limiting
-- Cross-platform support (Linux and Windows)
+- Logging via systemd journal + rotating file + `LOG_AUTHPRIV` audit trail
+- Per-user rate limiting
+- Linux first-class (systemd unit, setuid helper, sudoers grants, `.deb`); Windows builds the daemon binary only (no privilege model)
 
 ```
-Client (MCP server, AI agent, automation)
+MCP client (Claude Desktop, Claude Code, Cursor, LangChain, curl, …)
   |
-  |  HTTP POST with JSON
+  |  JSON-RPC 2.0 over HTTP   (POST /   +   GET / for SSE notifications)
   v
-MCP Bridge (this binary)
+MCP Bridge daemon  (this binary — the MCP server)
   |
-  |  Executes directly on the host OS
+  |  Runs as user `mcp`; privileged ops via setuid helper + scoped sudoers drop-ins
   v
-Server resources (files, databases, services, processes)
+Server resources (files, databases, services, processes, sandbox)
 ```
 
 ---
@@ -560,7 +560,46 @@ The bridge maintains a `context.json` file that is auto-created on the first req
 
 ## Logging
 
-All tool executions are logged to the console and to `logs/server.log` (rotating, 5MB max, 3 backups). Log output includes timestamps, client IP, tool name, and arguments.
+Three log surfaces, all populated by every running daemon:
+
+1. **systemd journal** — the `.service` unit has `StandardOutput=journal` and
+   `SyslogIdentifier=mcp_bridge`, so every line spdlog writes lands in
+   journald. This is the recommended interface post-install:
+
+   ```bash
+   sudo journalctl -u mcp-bridge -f                  # follow
+   sudo journalctl -u mcp-bridge --since "10 min ago"
+   sudo journalctl -u mcp-bridge -p err              # warnings + errors only
+   ```
+
+   Each request produces a single info line of the form:
+
+   ```
+   [<ip>] user=<shortid|admin> sess=<8-char-prefix> method=<jsonrpc-method>
+   ```
+
+2. **Rotating file** — same content, written by spdlog's rotating-file sink
+   (5 MB × 3 backups = 20 MB cap). Path is `logging.file` in `mcp.json`,
+   defaulting to `/var/log/mcp_bridge/server.log`. Set to `""` if you want
+   the journal sink only.
+
+3. **Sudoers audit trail** — [`src/core/grants.cpp`](src/core/grants.cpp)
+   emits a separate stream via `syslog(LOG_AUTHPRIV, …)` under identifier
+   `mcp-bridge-sudoers`. Every grant lifecycle event (`grant_issued`,
+   `grant_failed`, `grant_revoked`, `grant_revoke_orphan`,
+   `grant_reconciled`) lands there with `grantid`, `by` (user_id),
+   `client_ip`, and per-event detail.
+
+   ```bash
+   sudo journalctl -t mcp-bridge-sudoers             # grant audit
+   sudo journalctl -t mcp-bridge-sudoers -f
+   ```
+
+   On hosts that ship `/var/log/auth.log`, the same lines mirror there.
+
+Log level is set by `logging.level` in `mcp.json` (`debug` | `info` | `warn`
+| `error`). Changing it requires `systemctl restart mcp-bridge` —
+`SIGHUP` only reloads user records, not log configuration.
 
 ---
 
@@ -618,6 +657,34 @@ If you're running outside the `.deb`, copy the unit file from
 `debian/mcp-bridge.service`, install the binary at `/usr/bin/mcp_bridge`
 and the helper at `/usr/lib/mcp_bridge/mcp_bridge-priv` (mode 4750, root:mcp),
 then `systemctl daemon-reload && systemctl enable --now mcp-bridge`.
+
+---
+
+## Testing
+
+The repo ships an in-tree minimal test framework — no external dependencies —
+under [`tests/`](tests/). Build with `BUILD_TESTS=ON` and run via `ctest`:
+
+```bash
+cmake -B build -DBUILD_TESTS=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+Six binaries cover the load-bearing modules:
+
+| Binary                | Cases | Covers                                                                                |
+|-----------------------|-------|---------------------------------------------------------------------------------------|
+| `test_crypto`         |  6    | SHA-256 known vectors, salted hex, constant-time compare, hex encoding                |
+| `test_shortid`        |  6    | `make_shortid` charset/length/distinctness, `make_token`, UUIDv4 shape                |
+| `test_jsonrpc`        | 12    | Request/notification parse, batch rejection, error-code constants, response shape     |
+| `test_session`        |  7    | Issue + validate, cross-bearer rejection, idle expiry, last-seen extension, rotation  |
+| `test_grant_template` | 18    | Template parse, regex/charset rejection, rendered spec shape (visudo gate, defense)   |
+| `test_user_store`     |  5    | Empty/missing dir, load + lookup, reload picks up + drops users, malformed file skip  |
+
+End-to-end tests against a running daemon are not part of `ctest`; they live
+in the project's verification scripts and require launching the binary with
+a synthesized JSON config (the patterns are documented in `installer/release.md`).
 
 ---
 

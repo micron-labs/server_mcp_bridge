@@ -70,6 +70,18 @@ ProcessResult run_process(const std::string& command, const std::string& cwd,
     return result;
 }
 
+ProcessResult run_process_as(const std::string& os_username,
+                             const std::string& command,
+                             const std::string& cwd,
+                             int timeout_secs,
+                             const std::map<std::string,std::string>& env) {
+    // Privilege model on Windows differs from POSIX (CreateProcessAsUser
+    // needs a user token and LOGON_TYPE handling). Until that's wired up,
+    // run as the daemon's account.
+    (void)os_username;
+    return run_process(command, cwd, timeout_secs, env);
+}
+
 int spawn_background(const std::string& command, const std::string& cwd) {
     STARTUPINFOA si = {};
     si.cb = sizeof(si);
@@ -88,6 +100,13 @@ int spawn_background(const std::string& command, const std::string& cwd) {
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     return pid;
+}
+
+int spawn_background_as(const std::string& os_username,
+                        const std::string& command,
+                        const std::string& cwd) {
+    (void)os_username;
+    return spawn_background(command, cwd);
 }
 
 bool kill_process_by_pid(int pid, int /*signal*/) {
