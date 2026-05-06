@@ -48,9 +48,15 @@ set(TOOL_SOURCES
     src/tools/exec/command_ops.cpp
     src/tools/sandbox/sandbox_ops.cpp
     src/tools/scheduling/cron_ops.cpp
+    src/tools/scheduling/cron_to_schtasks.cpp
     src/tools/admin/grant_ops.cpp
     src/tools/admin/user_ops.cpp
 )
+if(WIN32)
+    list(APPEND TOOL_SOURCES src/tools/scheduling/cron_backend_windows.cpp)
+else()
+    list(APPEND TOOL_SOURCES src/tools/scheduling/cron_backend_linux.cpp)
+endif()
 
 if(WIN32)
     set(PLATFORM_SOURCES

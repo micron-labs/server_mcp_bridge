@@ -399,6 +399,117 @@ SpawnResult spawn_with_token(HANDLE token, const std::string& command,
     return r;
 }
 
+// ---- Subprocess helper for system tools (schtasks, etc.) ---------------
+//
+// LocalSystem-context invocation, no token impersonation, no shell. Used by
+// the cron ops to drive schtasks.exe. Returns exit code; `out` collects
+// merged stdout+stderr (capped). Args are passed as a properly-quoted argv
+// vector so the invoked binary parses them safely.
+int run_system_tool(const std::wstring& exe,
+                    const std::vector<std::wstring>& args,
+                    std::wstring& out_w,
+                    int timeout_secs = 30) {
+    // Build a quoted command line per CommandLineToArgvW rules.
+    std::wstring cmd = L"\"" + exe + L"\"";
+    for (auto& a : args) {
+        cmd += L" \"";
+        for (wchar_t c : a) {
+            if (c == L'"') cmd += L"\\\"";
+            else cmd.push_back(c);
+        }
+        cmd += L"\"";
+    }
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) {
+        out_w = L"CreatePipe failed";
+        return -1;
+    }
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    si.hStdInput = INVALID_HANDLE_VALUE;
+
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> cmd_buf(cmd.begin(), cmd.end());
+    cmd_buf.push_back(L'\0');
+
+    BOOL ok = CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(wr);
+    if (!ok) {
+        CloseHandle(rd);
+        out_w = L"CreateProcess failed: " +
+                std::to_wstring(GetLastError());
+        return -1;
+    }
+
+    // Reading first, then waiting, avoids the deadlock where schtasks
+    // fills its stdout buffer before we drain.
+    std::string out_a;
+    char buf[4096];
+    DWORD n;
+    while (ReadFile(rd, buf, sizeof(buf), &n, nullptr) && n > 0) {
+        if (out_a.size() + n > 256 * 1024) break;
+        out_a.append(buf, n);
+    }
+    CloseHandle(rd);
+
+    DWORD w = WaitForSingleObject(pi.hProcess,
+                                  timeout_secs > 0 ? static_cast<DWORD>(timeout_secs) * 1000
+                                                   : INFINITE);
+    if (w == WAIT_TIMEOUT) {
+        TerminateProcess(pi.hProcess, 1);
+    }
+    DWORD ec = 1;
+    GetExitCodeProcess(pi.hProcess, &ec);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    // CP_OEMCP is what schtasks emits on most locales; OEM is fine for
+    // diagnostics, and we only surface it back as plain text.
+    int wlen = MultiByteToWideChar(CP_OEMCP, 0, out_a.data(),
+                                   static_cast<int>(out_a.size()), nullptr, 0);
+    out_w.assign(wlen, L'\0');
+    if (wlen > 0) {
+        MultiByteToWideChar(CP_OEMCP, 0, out_a.data(),
+                            static_cast<int>(out_a.size()),
+                            out_w.data(), wlen);
+    }
+    return static_cast<int>(ec);
+}
+
+std::string narrow(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(),
+                                static_cast<int>(w.size()),
+                                nullptr, 0, nullptr, nullptr);
+    std::string out(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+                        out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+std::wstring widen(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                                nullptr, 0);
+    std::wstring out(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                        out.data(), n);
+    return out;
+}
+
+// ---- LogonUser path (continued) ----------------------------------------
+
 // LogonUser → token, with optional elevation (token-group membership swap).
 // On elevated=true, returns LocalSystem's primary token (caller is already
 // LocalSystem so OpenProcessToken on GetCurrentProcess is correct).
@@ -445,6 +556,57 @@ HANDLE acquire_token_for(const std::string& shortid, bool elevated,
 }
 
 // ---- ACL helpers ---------------------------------------------------------
+
+// Builds a DACL granting SYSTEM + Administrators full, plus `user_sid_str`
+// generic-read+execute. Used for cron metadata files: the priv service
+// (SYSTEM) writes them; the per-tenant user runs the runner as themselves
+// and needs to read them.
+bool set_path_user_readable(const std::string& path, const std::string& user_sid_str) {
+    if (user_sid_str.empty()) return false;
+    PSID user_sid = nullptr;
+    if (!ConvertStringSidToSidA(user_sid_str.c_str(), &user_sid)) return false;
+
+    PSID system_sid = nullptr, admin_sid = nullptr;
+    SID_IDENTIFIER_AUTHORITY nt = SECURITY_NT_AUTHORITY;
+    AllocateAndInitializeSid(&nt, 1, SECURITY_LOCAL_SYSTEM_RID,
+                             0,0,0,0,0,0,0, &system_sid);
+    AllocateAndInitializeSid(&nt, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                             DOMAIN_ALIAS_RID_ADMINS, 0,0,0,0,0,0, &admin_sid);
+
+    EXPLICIT_ACCESSA ea[3] = {};
+    ea[0].grfAccessPermissions = GENERIC_ALL;
+    ea[0].grfAccessMode        = SET_ACCESS;
+    ea[0].grfInheritance       = NO_INHERITANCE;
+    ea[0].Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+    ea[0].Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea[0].Trustee.ptstrName    = reinterpret_cast<LPSTR>(system_sid);
+
+    ea[1] = ea[0];
+    ea[1].Trustee.ptstrName = reinterpret_cast<LPSTR>(admin_sid);
+
+    ea[2].grfAccessPermissions = GENERIC_READ | GENERIC_EXECUTE;
+    ea[2].grfAccessMode        = SET_ACCESS;
+    ea[2].grfInheritance       = NO_INHERITANCE;
+    ea[2].Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+    ea[2].Trustee.TrusteeType  = TRUSTEE_IS_USER;
+    ea[2].Trustee.ptstrName    = reinterpret_cast<LPSTR>(user_sid);
+
+    PACL acl = nullptr;
+    bool ok = false;
+    if (SetEntriesInAclA(3, ea, nullptr, &acl) == ERROR_SUCCESS) {
+        DWORD rc = SetNamedSecurityInfoA(const_cast<char*>(path.c_str()),
+                                         SE_FILE_OBJECT,
+                                         DACL_SECURITY_INFORMATION |
+                                             PROTECTED_DACL_SECURITY_INFORMATION,
+                                         nullptr, nullptr, acl, nullptr);
+        ok = (rc == ERROR_SUCCESS);
+        if (acl) LocalFree(acl);
+    }
+    if (system_sid) FreeSid(system_sid);
+    if (admin_sid)  FreeSid(admin_sid);
+    if (user_sid)   LocalFree(user_sid);
+    return ok;
+}
 
 bool set_path_owner_system_only(const std::string& path) {
     // Best-effort: tighten DACL so only LocalSystem + Administrators can
@@ -787,6 +949,235 @@ json handle_run_as(const json& req) {
         {"stdout", sr.stdout_str},
         {"stderr", sr.stderr_str}
     };
+}
+
+// ---- Cron op handlers --------------------------------------------------
+//
+// Tasks are registered under `\mcp_bridge\<shortid>\<job_id>` so a single
+// /Query call (filtered by prefix) yields the per-user job set without
+// pulling in unrelated host tasks. The task runs as the per-tenant user
+// using the LSA-stored password; cron-runner.ps1 picks up the metadata as
+// that user and posts to the webhook.
+
+namespace {
+
+std::string cron_task_folder(const std::string& shortid) {
+    return "\\mcp_bridge\\" + shortid;
+}
+
+std::string cron_task_path(const std::string& shortid, const std::string& job_id) {
+    return cron_task_folder(shortid) + "\\" + job_id;
+}
+
+std::string cron_meta_dir(const std::string& shortid) {
+    return users_state_dir() + "\\mcp_user_" + shortid + "\\crons";
+}
+
+std::string cron_meta_path(const std::string& shortid, const std::string& job_id) {
+    return cron_meta_dir(shortid) + "\\" + job_id + ".json";
+}
+
+std::wstring service_install_dir() {
+    // Resolve the directory of *this* binary so we can derive the runner
+    // script path without a hard-coded install location. The MSI keeps
+    // mcp_bridge.exe, mcp_bridge_priv.exe, and mcp_bridge-cron-runner.ps1
+    // co-located.
+    wchar_t buf[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return L"";
+    std::wstring p(buf, n);
+    auto pos = p.find_last_of(L"\\/");
+    return pos == std::wstring::npos ? L"" : p.substr(0, pos);
+}
+
+}  // namespace
+
+json handle_cron_install_job(const json& req) {
+    std::string shortid = req.value("shortid", "");
+    std::string job_id  = req.value("job_id", "");
+    if (!valid_shortid(shortid))
+        return {{"ok", false}, {"error", "invalid shortid"}};
+    if (!valid_grantid(job_id))   // 16-hex; same charset as grantid
+        return {{"ok", false}, {"error", "invalid job_id"}};
+    if (!req.contains("sched_args") || !req["sched_args"].is_array())
+        return {{"ok", false}, {"error", "missing sched_args"}};
+
+    // SID binding: refuse to install a schedule for a user whose account
+    // doesn't currently exist or whose SID has rotated since useradd.
+    std::string username = "mcp_user_" + shortid;
+    std::wstring wuser(username.begin(), username.end());
+    std::string live_sid = sid_string_for_user(wuser);
+    if (live_sid.empty())
+        return {{"ok", false}, {"error", "user does not exist"}};
+    std::string persisted = lookup_persisted_sid(username);
+    if (!persisted.empty() && persisted != live_sid) {
+        audit_event("cron_install_sid_mismatch",
+                    "user=" + username + " job=" + job_id);
+        return {{"ok", false}, {"error", "SID rebinding detected"}};
+    }
+
+    // Recover the password the useradd handler stored in LSA.
+    std::wstring pw_key = L"mcp_bridge_pw_" + std::wstring(shortid.begin(), shortid.end());
+    std::wstring pw;
+    if (!lsa_retrieve_password(pw_key, pw)) {
+        return {{"ok", false}, {"error", "cron: LSA password lookup failed"}};
+    }
+
+    std::wstring inst = service_install_dir();
+    if (inst.empty()) {
+        SecureZeroMemory(pw.data(), pw.size() * sizeof(wchar_t));
+        return {{"ok", false}, {"error", "cron: cannot resolve install dir"}};
+    }
+    std::wstring runner = inst + L"\\mcp_bridge-cron-runner.ps1";
+
+    // /TR's argument is itself a string handed to the OS, with quoting
+    // rules that bite anyone who hand-builds it. Format: powershell.exe
+    // followed by quoted -File <path> and the job_id.
+    std::wstring tr =
+        L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \""
+        + runner + L"\" " + std::wstring(job_id.begin(), job_id.end());
+
+    std::wstring tn = widen(cron_task_path(shortid, job_id));
+    std::wstring user_w = wuser;
+
+    std::vector<std::wstring> args = {
+        L"/Create",
+        L"/TN", tn,
+        L"/TR", tr,
+        L"/F",                    // overwrite if a previous task with the same TN exists
+        L"/RU", user_w,
+        L"/RP", pw,
+    };
+    // Append the schedule flags emitted by cron_to_schtasks::translate.
+    for (const auto& a : req["sched_args"]) {
+        if (a.is_string()) {
+            args.push_back(widen(a.get<std::string>()));
+        }
+    }
+
+    std::wstring out;
+    int rc = run_system_tool(L"schtasks.exe", args, out);
+    SecureZeroMemory(pw.data(), pw.size() * sizeof(wchar_t));
+
+    if (rc != 0) {
+        audit_event("cron_install_failed",
+                    "user=" + username + " job=" + job_id + " rc=" + std::to_string(rc));
+        return {{"ok", false},
+                {"error", "schtasks /Create exit=" + std::to_string(rc) +
+                          " out=" + narrow(out)}};
+    }
+    audit_event("cron_install", "user=" + username + " job=" + job_id);
+    return {{"ok", true}};
+}
+
+json handle_cron_remove_job(const json& req) {
+    std::string shortid = req.value("shortid", "");
+    std::string job_id  = req.value("job_id", "");
+    if (!valid_shortid(shortid))
+        return {{"ok", false}, {"error", "invalid shortid"}};
+    if (!valid_grantid(job_id))
+        return {{"ok", false}, {"error", "invalid job_id"}};
+
+    std::wstring tn = widen(cron_task_path(shortid, job_id));
+    std::wstring out;
+    int rc = run_system_tool(L"schtasks.exe",
+                             {L"/Delete", L"/TN", tn, L"/F"}, out);
+    if (rc != 0) {
+        // schtasks returns non-zero (often 1) when the task doesn't exist.
+        // That's idempotent for our purposes — surface as ok.
+        audit_event("cron_remove_noop",
+                    "user=mcp_user_" + shortid + " job=" + job_id +
+                    " rc=" + std::to_string(rc));
+        return {{"ok", true}, {"existed", false}};
+    }
+    audit_event("cron_remove", "user=mcp_user_" + shortid + " job=" + job_id);
+    return {{"ok", true}, {"existed", true}};
+}
+
+json handle_cron_list_jobs(const json& req) {
+    std::string shortid = req.value("shortid", "");
+    if (!valid_shortid(shortid))
+        return {{"ok", false}, {"error", "invalid shortid"}};
+
+    // /Query against the per-user folder; if the folder doesn't exist yet
+    // (no jobs have ever been installed) schtasks returns 1 and "ERROR:".
+    // Treat that as an empty list.
+    std::wstring tn = widen(cron_task_folder(shortid));
+    std::wstring out;
+    int rc = run_system_tool(L"schtasks.exe",
+                             {L"/Query", L"/TN", tn, L"/FO", L"CSV", L"/NH"}, out);
+    json job_ids = json::array();
+    if (rc == 0) {
+        // CSV: each line is "TaskName","Next Run Time","Status"
+        std::string narrow_out = narrow(out);
+        std::string prefix = cron_task_folder(shortid) + "\\";
+        size_t pos = 0;
+        while (pos < narrow_out.size()) {
+            size_t eol = narrow_out.find('\n', pos);
+            std::string line = narrow_out.substr(pos, eol == std::string::npos
+                                                          ? std::string::npos
+                                                          : eol - pos);
+            pos = eol == std::string::npos ? narrow_out.size() : eol + 1;
+            if (line.empty() || line[0] != '"') continue;
+            auto end_q = line.find('"', 1);
+            if (end_q == std::string::npos) continue;
+            std::string name = line.substr(1, end_q - 1);
+            // Tolerate both "\mcp_bridge\..." and "mcp_bridge\..." forms.
+            std::string full = prefix;
+            std::string trimmed = name;
+            if (!trimmed.empty() && trimmed[0] == '\\') trimmed.erase(0, 1);
+            std::string fp = prefix.substr(prefix.front() == '\\' ? 1 : 0);
+            if (trimmed.size() > fp.size() && trimmed.compare(0, fp.size(), fp) == 0) {
+                std::string id = trimmed.substr(fp.size());
+                if (valid_grantid(id)) job_ids.push_back(id);
+            }
+        }
+    }
+    return {{"ok", true}, {"job_ids", job_ids}};
+}
+
+json handle_cron_write_meta(const json& req) {
+    std::string shortid = req.value("shortid", "");
+    std::string job_id  = req.value("job_id", "");
+    if (!valid_shortid(shortid))
+        return {{"ok", false}, {"error", "invalid shortid"}};
+    if (!valid_grantid(job_id))
+        return {{"ok", false}, {"error", "invalid job_id"}};
+    if (!req.contains("content") || !req["content"].is_object())
+        return {{"ok", false}, {"error", "missing content"}};
+
+    std::error_code ec;
+    fs::create_directories(cron_meta_dir(shortid), ec);
+
+    std::string path = cron_meta_path(shortid, job_id);
+    if (!atomic_write_file(path, req["content"].dump(2) + "\n")) {
+        return {{"ok", false}, {"error", "failed to write metadata file"}};
+    }
+
+    // Grant the per-tenant user read access; the runner will run as them.
+    std::string username = "mcp_user_" + shortid;
+    std::wstring wuser(username.begin(), username.end());
+    std::string user_sid = sid_string_for_user(wuser);
+    if (user_sid.empty() || !set_path_user_readable(path, user_sid)) {
+        // ACL fix-up failed but the file exists. Don't fail the op — the
+        // priv service can still read it; only the runner-as-user would
+        // be denied. Surface a warning in the audit log.
+        audit_event("cron_meta_acl_warn",
+                    "user=" + username + " job=" + job_id + " path=" + path);
+    }
+    return {{"ok", true}};
+}
+
+json handle_cron_delete_meta(const json& req) {
+    std::string shortid = req.value("shortid", "");
+    std::string job_id  = req.value("job_id", "");
+    if (!valid_shortid(shortid))
+        return {{"ok", false}, {"error", "invalid shortid"}};
+    if (!valid_grantid(job_id))
+        return {{"ok", false}, {"error", "invalid job_id"}};
+    std::error_code ec;
+    fs::remove(cron_meta_path(shortid, job_id), ec);
+    return {{"ok", true}};
 }
 
 json handle_spawn_background_as(const json& req) {

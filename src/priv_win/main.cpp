@@ -165,6 +165,11 @@ json dispatch(const json& req) {
     if (op == kCleanupUserState)      return priv_win::handle_cleanup_user_state(req);
     if (op == kRunAs)                 return priv_win::handle_run_as(req);
     if (op == kSpawnBackgroundAs)     return priv_win::handle_spawn_background_as(req);
+    if (op == kCronInstallJob)        return priv_win::handle_cron_install_job(req);
+    if (op == kCronRemoveJob)         return priv_win::handle_cron_remove_job(req);
+    if (op == kCronListJobs)          return priv_win::handle_cron_list_jobs(req);
+    if (op == kCronWriteMeta)         return priv_win::handle_cron_write_meta(req);
+    if (op == kCronDeleteMeta)        return priv_win::handle_cron_delete_meta(req);
     return {{"ok", false}, {"error", "unknown op: " + op}};
 }
 

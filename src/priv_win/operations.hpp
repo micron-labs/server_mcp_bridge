@@ -29,6 +29,19 @@ json handle_cleanup_user_state(const json& req);
 json handle_run_as(const json& req);
 json handle_spawn_background_as(const json& req);
 
+// ---- Cron ops ----------------------------------------------------------
+// schtasks-backed equivalents of the Linux crontab dance. Tasks register
+// under the namespace `mcp_bridge\<shortid>\<job_id>` so a single LIST
+// scope cleanly separates per-tenant schedules. Each task is registered to
+// run as the per-tenant user identity using the LSA-stored password the
+// useradd handler captured.
+
+json handle_cron_install_job(const json& req);
+json handle_cron_remove_job(const json& req);
+json handle_cron_list_jobs(const json& req);
+json handle_cron_write_meta(const json& req);
+json handle_cron_delete_meta(const json& req);
+
 // ---- Helpers (exposed for testability) ----
 
 // `mcp_user_<shortid>` per the Linux convention; same shape on Windows so

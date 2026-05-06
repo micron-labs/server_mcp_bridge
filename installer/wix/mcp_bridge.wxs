@@ -82,6 +82,24 @@
                             Name="mcp_bridge_priv"
                             Wait="yes" />
           </Component>
+
+          <!-- Cron-runner script. Invoked by Task Scheduler as the per-tenant
+               user; reads metadata + runtime.json and POSTs to the webhook.
+               Lives in InstallDir so its path is stable for the priv
+               service's cron_install_job handler to embed in /TR. -->
+          <Component Id="cmpCronRunner" Guid="*" Win64="yes">
+            <File Id="filCronRunner"
+                  Name="mcp_bridge-cron-runner.ps1"
+                  Source="installer\mcp_bridge-cron-runner.ps1"
+                  KeyPath="yes" />
+          </Component>
+
+          <Component Id="cmpPostInstall" Guid="*" Win64="yes">
+            <File Id="filPostInstall"
+                  Name="postinstall.ps1"
+                  Source="installer\wix\postinstall.ps1"
+                  KeyPath="yes" />
+          </Component>
         </Directory>
       </Directory>
 
@@ -144,6 +162,8 @@
     <Feature Id="Main" Title="MCP Bridge" Level="1">
       <ComponentRef Id="cmpDaemon" />
       <ComponentRef Id="cmpPriv" />
+      <ComponentRef Id="cmpCronRunner" />
+      <ComponentRef Id="cmpPostInstall" />
       <ComponentRef Id="cmpConfigTemplate" />
       <ComponentRef Id="cmpGrantsDir" />
       <ComponentRef Id="cmpStateDir" />

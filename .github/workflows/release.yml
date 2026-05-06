@@ -100,6 +100,7 @@ jobs:
           copy build\Release\mcp_bridge.exe       dist\${{ matrix.artifact }}.exe
           copy build\Release\mcp_bridge_priv.exe  dist\${{ matrix.artifact }}-priv.exe
           copy etc\mcp_bridge\mcp.json.template   dist\
+          copy installer\mcp_bridge-cron-runner.ps1 dist\
 
       - name: Generate SHA256 sidecars (Linux)
         if: runner.os == 'Linux'
@@ -216,6 +217,7 @@ jobs:
               -name "*.deb" -o -name "*.deb.sha256" \
               -o -name "mcp-bridge-*" -o -name "*.exe" -o -name "*.exe.sha256" \
               -o -name "*.msi" -o -name "*.msi.sha256" \
+              -o -name "mcp_bridge-cron-runner.ps1" \
            \) -exec cp {} release/ \;
           # Generate sidecars for any .deb that didn't come with one.
           for f in release/*.deb; do

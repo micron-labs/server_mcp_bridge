@@ -99,10 +99,12 @@ function Render-Config {
   "server":   { "host": "127.0.0.1", "port": 8080, "enable_ssl": false, "ssl_cert": "", "ssl_key": "" },
   "auth":     { "global_token_salt": "$Salt", "admin_token_hash": "$Hash" },
   "paths":    {
-    "users_dir":   "$($ConfigDir.Replace('\','/'))/users",
-    "state_dir":   "$($ConfigDir.Replace('\','/'))/state",
-    "sudoers_dir": "$($ConfigDir.Replace('\','/'))/grants",
-    "helper_path": "$($InstallRoot.Replace('\','/'))/mcp_bridge_priv.exe"
+    "users_dir":        "$($ConfigDir.Replace('\','/'))/users",
+    "users_state_dir":  "$($ConfigDir.Replace('\','/'))/users_state",
+    "state_dir":        "$($ConfigDir.Replace('\','/'))/state",
+    "sudoers_dir":      "$($ConfigDir.Replace('\','/'))/grants",
+    "helper_path":      "$($InstallRoot.Replace('\','/'))/mcp_bridge_priv.exe",
+    "cron_runner_path": "$($InstallRoot.Replace('\','/'))/mcp_bridge-cron-runner.ps1"
   },
   "grant_sweep_interval_seconds": 30,
   "security": { "allowed_ips": [], "rate_limit": 60, "allowed_root": "C:/", "dangerous_tools_enabled": false, "enable_raw_queries": false },
@@ -204,6 +206,17 @@ try {
     Get-WithChecksum -Url $privExeUrl -OutPath $tmpPrivExe
     Copy-Item $tmpExe     -Destination "$InstallRoot\mcp_bridge.exe"      -Force
     Copy-Item $tmpPrivExe -Destination "$InstallRoot\mcp_bridge_priv.exe" -Force
+
+    # Cron-runner script — invoked by Task Scheduler as the per-tenant user.
+    # Embed it at install time; if a release ships a newer copy alongside the
+    # binaries, prefer that one.
+    $runnerUrl = "$BaseUrl/mcp_bridge-cron-runner.ps1"
+    $runnerLocal = "$InstallRoot\mcp_bridge-cron-runner.ps1"
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $runnerUrl -OutFile $runnerLocal
+    } catch {
+        Write-Host "  cron-runner: release artifact unavailable, leaving any existing copy in place" -ForegroundColor Yellow
+    }
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

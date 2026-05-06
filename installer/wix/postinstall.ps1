@@ -51,10 +51,12 @@ if (-not (Test-Path $configPath)) {
   "server":   { "host": "127.0.0.1", "port": 8080, "enable_ssl": false, "ssl_cert": "", "ssl_key": "" },
   "auth":     { "global_token_salt": "$salt", "admin_token_hash": "$hash" },
   "paths":    {
-    "users_dir":   "$cfgDir/users",
-    "state_dir":   "$cfgDir/state",
-    "sudoers_dir": "$cfgDir/grants",
-    "helper_path": "$instDir/mcp_bridge_priv.exe"
+    "users_dir":        "$cfgDir/users",
+    "users_state_dir":  "$cfgDir/users_state",
+    "state_dir":        "$cfgDir/state",
+    "sudoers_dir":      "$cfgDir/grants",
+    "helper_path":      "$instDir/mcp_bridge_priv.exe",
+    "cron_runner_path": "$instDir/mcp_bridge-cron-runner.ps1"
   },
   "grant_sweep_interval_seconds": 30,
   "security": { "allowed_ips": [], "rate_limit": 60, "allowed_root": "C:/", "dangerous_tools_enabled": false, "enable_raw_queries": false },

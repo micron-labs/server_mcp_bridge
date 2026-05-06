@@ -29,6 +29,11 @@ inline constexpr const char* kPrepareUserState      = "prepare_user_state";
 inline constexpr const char* kCleanupUserState      = "cleanup_user_state";
 inline constexpr const char* kRunAs                 = "run_as";
 inline constexpr const char* kSpawnBackgroundAs     = "spawn_background_as";
+inline constexpr const char* kCronInstallJob        = "cron_install_job";
+inline constexpr const char* kCronRemoveJob         = "cron_remove_job";
+inline constexpr const char* kCronListJobs          = "cron_list_jobs";
+inline constexpr const char* kCronWriteMeta         = "cron_write_meta";
+inline constexpr const char* kCronDeleteMeta        = "cron_delete_meta";
 }  // namespace op
 
 // Single read/write message size cap. Keeps the parser bounded; commands the

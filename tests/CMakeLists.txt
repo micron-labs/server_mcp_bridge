@@ -10,6 +10,7 @@ set(MCP_TESTS
     test_grant_template
     test_user_store
     test_cron_store
+    test_cron_to_schtasks
 )
 
 foreach(t IN LISTS MCP_TESTS)
