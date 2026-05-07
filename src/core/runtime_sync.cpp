@@ -4,9 +4,12 @@
 #include <spdlog/spdlog.h>
 #include <dirent.h>
 #include <fstream>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <stdexcept>
 
 using json = nlohmann::json;
+extern char** environ;
 
 namespace {
 
@@ -37,6 +40,32 @@ std::string base64_encode(const std::string& in) {
     return out;
 }
 
+int spawn_priv_write_runtime(const std::string& helper_path,
+                             const std::string& shortid,
+                             const std::string& b64) {
+    if (helper_path.empty()) return -1;
+    if (shortid.empty()) return -1;
+    if (b64.empty()) return -1;
+
+    char* argv_c[] = {
+        const_cast<char*>(helper_path.c_str()),
+        const_cast<char*>("write-runtime"),
+        const_cast<char*>(shortid.c_str()),
+        const_cast<char*>(b64.c_str()),
+        nullptr
+    };
+    char path_env[] = "PATH=/usr/sbin:/usr/bin:/sbin:/bin";
+    char* env_c[] = {path_env, nullptr};
+
+    pid_t pid;
+    int rc = posix_spawn(&pid, helper_path.c_str(), nullptr, nullptr, argv_c, env_c);
+    if (rc != 0) return -1;
+    int st;
+    if (::waitpid(pid, &st, 0) < 0) return -1;
+    if (!WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
+
 }
 
 namespace runtime_sync {
@@ -53,11 +82,22 @@ void write_for_user(const Config& cfg, const std::string& os_username) {
     std::string body = content.dump(2) + "\n";
     std::string b64 = base64_encode(body);
 
+    // Prefer the privileged helper: it writes the file as root then chown/chmod,
+    // avoiding dependence on per-user directory permissions and shell tooling.
+    if (!cfg.helper_path.empty()) {
+        const std::string prefix = "mcp_user_";
+        if (os_username.rfind(prefix, 0) == 0 && os_username.size() == prefix.size() + 8) {
+            std::string shortid = os_username.substr(prefix.size());
+            int rc = spawn_priv_write_runtime(cfg.helper_path, shortid, b64);
+            if (rc == 0) return;
+            throw std::runtime_error("runtime_sync: write for " + os_username +
+                                     " failed (helper_exit=" + std::to_string(rc) + ")");
+        }
+    }
+
+    // Fallback: best-effort shell pipeline as the user.
     std::string runtime_path = cfg.users_state_dir + "/" + os_username + "/runtime.json";
     std::string tmp_path     = runtime_path + ".tmp";
-
-    // base64 chars are shell-safe inside single-quotes; the only thing that
-    // could surprise us is the `=` padding which is also single-quote-safe.
     std::string cmd =
         "umask 077 && printf '%s' '" + b64 + "' | base64 -d > '" + tmp_path + "' && "
         "chmod 600 '" + tmp_path + "' && "

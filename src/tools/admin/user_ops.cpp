@@ -130,6 +130,30 @@ void register_user_tools() {
             auto token   = mcp::make_token();
             auto hash    = crypto::sha256_salted_hex(cfg.global_token_salt, token);
 
+            // Provision OS resources first. If this fails we must not leave behind
+            // an auth-able user record (token) that can't execute anything.
+            int rc = spawn_helper(cfg.helper_path, "useradd", shortid);
+            // 14 = OS account already exists; treat as idempotent.
+            bool os_provisioned = (rc == 0 || rc == 14);
+            if (!os_provisioned) {
+                throw std::runtime_error("user_create: OS account provisioning failed (helper_exit=" +
+                                         std::to_string(rc) + ")");
+            }
+
+            int state_rc = spawn_helper(cfg.helper_path, "prepare-user-state", shortid);
+            if (state_rc != 0) {
+                throw std::runtime_error("user_create: prepare-user-state failed (helper_exit=" +
+                                         std::to_string(state_rc) + ")");
+            }
+
+            bool runtime_written = false;
+            try {
+                runtime_sync::write_for_user(cfg, "mcp_user_" + shortid);
+                runtime_written = true;
+            } catch (const std::exception& e) {
+                spdlog::warn("user_create: runtime_sync failed for {}: {}", shortid, e.what());
+            }
+
             json record = {
                 {"user_id", shortid},
                 {"os_username", "mcp_user_" + shortid},
@@ -143,28 +167,6 @@ void register_user_tools() {
             std::string user_path = cfg.users_dir + "/" + shortid + ".json";
             atomic_write_excl(user_path, record.dump(2) + "\n");
 
-            int rc = spawn_helper(cfg.helper_path, "useradd", shortid);
-            // 14 = OS account already exists; treat as idempotent.
-            bool os_provisioned = (rc == 0 || rc == 14);
-
-            int state_rc = -1;
-            bool runtime_written = false;
-            if (os_provisioned) {
-                state_rc = spawn_helper(cfg.helper_path, "prepare-user-state", shortid);
-                if (state_rc == 0) {
-                    try {
-                        runtime_sync::write_for_user(cfg, "mcp_user_" + shortid);
-                        runtime_written = true;
-                    } catch (const std::exception& e) {
-                        spdlog::warn("user_create: runtime_sync failed for {}: {}",
-                                     shortid, e.what());
-                    }
-                } else {
-                    spdlog::warn("user_create: helper prepare-user-state {} returned {}",
-                                 shortid, state_rc);
-                }
-            }
-
             Server::users().reload();
 
             return {
@@ -176,7 +178,7 @@ void register_user_tools() {
                 {"token", token},
                 {"os_provisioned", os_provisioned},
                 {"helper_exit", rc},
-                {"state_dir_prepared", state_rc == 0},
+                {"state_dir_prepared", true},
                 {"runtime_written", runtime_written}
             };
         }

@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <cerrno>
 
 ProcessResult run_process(const std::string& command, const std::string& cwd,
                           int timeout_secs, const std::map<std::string,std::string>& env) {
@@ -130,11 +131,10 @@ ProcessResult run_process_as(const std::string& os_username,
         envp.push_back(nullptr);
 
         std::string full_cmd = command;
-        if (timeout_secs > 0) {
-            full_cmd = "timeout " + std::to_string(timeout_secs) + " " + full_cmd;
-        }
         if (!cwd.empty()) {
             // chdir as the target user; if it fails, surface via shell exit.
+            // Note: `cd` is a shell builtin, so any timeout wrapper must still
+            // invoke a shell (see below).
             full_cmd = "cd " + cwd + " && " + full_cmd;
         }
 
@@ -142,9 +142,26 @@ ProcessResult run_process_as(const std::string& os_username,
         char dashc[] = "-c";
         std::vector<char> cmd_buf(full_cmd.begin(), full_cmd.end());
         cmd_buf.push_back('\0');
-        char* argv[] = {shell, dashc, cmd_buf.data(), nullptr};
 
+        if (timeout_secs > 0) {
+            // IMPORTANT: do NOT construct `timeout <secs> <cmd>` inside a shell
+            // string, because timeout execs <cmd> directly, which breaks shell
+            // builtins (cd/umask/etc). Instead, run: timeout <secs> /bin/sh -c <cmd>.
+            std::string timeout_path = "/usr/bin/timeout";
+            std::string timeout_s = std::to_string(timeout_secs);
+            char* argv_timeout[] = {
+                const_cast<char*>(timeout_path.c_str()),
+                const_cast<char*>(timeout_s.c_str()),
+                shell, dashc, cmd_buf.data(),
+                nullptr
+            };
+            execve(timeout_path.c_str(), argv_timeout, envp.data());
+            // Fall back to /bin/sh if timeout is missing.
+        }
+
+        char* argv[] = {shell, dashc, cmd_buf.data(), nullptr};
         execve(shell, argv, envp.data());
+        dprintf(STDERR_FILENO, "execve(%s) failed: %s\n", (timeout_secs > 0 ? "/usr/bin/timeout or /bin/sh" : shell), strerror(errno));
         _exit(127);  // exec failed
     }
 
@@ -167,11 +184,20 @@ ProcessResult run_process_as(const std::string& os_username,
     if (WIFEXITED(status)) {
         int rc = WEXITSTATUS(status);
         result.exit_code = rc;
+        // stdout_str contains both stdout and stderr from the child.
+        // If the command failed and produced output, surface it.
+        if (rc != 0 && result.stderr_str.empty() && !result.stdout_str.empty()) {
+            result.stderr_str = result.stdout_str;
+        }
         if (rc == 126) {
             result.stderr_str = "run_process_as: privilege drop to '" +
                                 os_username + "' failed (need CAP_SETUID/CAP_SETGID?)";
         } else if (rc == 127) {
-            result.stderr_str = "run_process_as: execve(/bin/sh) failed";
+            if (!result.stdout_str.empty()) {
+                result.stderr_str = "run_process_as: " + result.stdout_str;
+            } else {
+                result.stderr_str = "run_process_as: execve(/bin/sh) failed";
+            }
         }
     } else {
         result.exit_code = -1;

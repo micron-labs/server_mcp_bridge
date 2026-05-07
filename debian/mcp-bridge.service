@@ -32,7 +32,11 @@ CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRID
 
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/mcp_bridge /var/log/mcp_bridge /etc/sudoers.d
+# The daemon uses a setuid helper to provision OS users via `useradd`, which
+# mutates passwd/group databases under /etc. Do not list specific `*.lock`
+# paths here: they may not exist, and systemd will fail mount namespacing at
+# startup. Instead, allow /etc as a whole inside the service namespace.
+ReadWritePaths=/var/lib/mcp_bridge /var/log/mcp_bridge /etc /etc/sudoers.d
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

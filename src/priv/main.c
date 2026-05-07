@@ -47,8 +47,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef MCP_STATE_DIR
@@ -102,6 +104,180 @@ static int run(const char* path, char* const argv[]) {
     return WEXITSTATUS(st);
 }
 
+// Spawn a child with stderr redirected to a pipe, then return its exit code and
+// write (truncated) stderr into `errbuf` (always NUL-terminated).
+static int run_capture_stderr(const char* path, char* const argv[],
+                              char* errbuf, size_t errbuf_sz) {
+    if (!errbuf || errbuf_sz == 0) return -1;
+    errbuf[0] = '\0';
+
+    int p[2];
+    if (pipe(p) != 0) {
+        snprintf(errbuf, errbuf_sz, "pipe: %s", strerror(errno));
+        return -1;
+    }
+    // Best-effort CLOEXEC for both ends.
+    (void)fcntl(p[0], F_SETFD, fcntl(p[0], F_GETFD) | FD_CLOEXEC);
+    (void)fcntl(p[1], F_SETFD, fcntl(p[1], F_GETFD) | FD_CLOEXEC);
+
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    // Child stderr/stdout -> pipe write end.
+    //
+    // We intentionally capture stdout too: some shadow-utils builds emit certain
+    // error lines on stdout, which would otherwise leak into journald.
+    posix_spawn_file_actions_adddup2(&fa, p[1], STDERR_FILENO);
+    posix_spawn_file_actions_adddup2(&fa, p[1], STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&fa, p[0]);
+    posix_spawn_file_actions_addclose(&fa, p[1]);
+
+    pid_t pid;
+    int rc = posix_spawn(&pid, path, &fa, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(p[1]); // parent reads from p[0]
+
+    if (rc != 0) {
+        snprintf(errbuf, errbuf_sz, "posix_spawn %s: %s", path, strerror(rc));
+        close(p[0]);
+        return -1;
+    }
+
+    size_t off = 0;
+    while (off + 1 < errbuf_sz) {
+        ssize_t n = read(p[0], errbuf + off, errbuf_sz - 1 - off);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (n == 0) break;
+        off += (size_t)n;
+    }
+    errbuf[off] = '\0';
+    close(p[0]);
+
+    int st;
+    if (waitpid(pid, &st, 0) < 0) return -1;
+    if (!WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
+
+static int fd_locked_by_fcntl(int fd) {
+    struct flock fl;
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start = 0;
+    fl.l_len = 0; // whole file
+    if (fcntl(fd, F_SETLK, &fl) != 0) {
+        if (errno == EACCES || errno == EAGAIN) return 1;
+        return 0;
+    }
+    fl.l_type = F_UNLCK;
+    (void)fcntl(fd, F_SETLK, &fl);
+    return 0;
+}
+
+static pid_t lock_holder_pid_by_fcntl(int fd) {
+    struct flock fl;
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start = 0;
+    fl.l_len = 0; // whole file
+    if (fcntl(fd, F_GETLK, &fl) != 0) return 0;
+    if (fl.l_type == F_UNLCK) return 0;
+    return fl.l_pid;
+}
+
+static int passwd_db_locked(void) {
+    // shadow-utils uses advisory fcntl(2) locks (via lockf/lckpwdf) while
+    // updating passwd/group/shadow. The presence of a lock *file* is not a
+    // sufficient signal (e.g. /etc/.pwd.lock can exist permanently), so we
+    // attempt to take a non-blocking fcntl write lock.
+    const char* locks[] = {
+        "/etc/passwd.lock",
+        "/etc/shadow.lock",
+        "/etc/group.lock",
+        "/etc/gshadow.lock",
+        "/etc/.pwd.lock",
+    };
+    for (size_t i = 0; i < sizeof(locks) / sizeof(locks[0]); ++i) {
+        int fd = open(locks[i], O_RDWR | O_CLOEXEC);
+        if (fd < 0) continue; // doesn't exist or can't open; ignore
+        int locked = fd_locked_by_fcntl(fd);
+        close(fd);
+        if (locked) return 1;
+    }
+    return 0;
+}
+
+static pid_t passwd_db_lock_holder(void) {
+    // Some tools lock the "lock files" (e.g. /etc/.pwd.lock), while others
+    // lock the database files themselves (/etc/passwd, /etc/shadow, ...).
+    // We probe both sets.
+    const char* paths[] = {
+        "/etc/passwd",      "/etc/shadow",      "/etc/group",      "/etc/gshadow",
+        "/etc/passwd.lock", "/etc/shadow.lock", "/etc/group.lock", "/etc/gshadow.lock",
+        "/etc/.pwd.lock",
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        int fd = open(paths[i], O_RDWR | O_CLOEXEC);
+        if (fd < 0) {
+            // Fall back to O_RDONLY for files like /etc/shadow when running in
+            // constrained environments; advisory lock queries still work.
+            fd = open(paths[i], O_RDONLY | O_CLOEXEC);
+            if (fd < 0) continue;
+        }
+        pid_t pid = lock_holder_pid_by_fcntl(fd);
+        close(fd);
+        if (pid > 0) return pid;
+    }
+    return 0; // unknown / OFD lock / no lock observed
+}
+
+static void sleep_ms(int ms) {
+    if (ms <= 0) return;
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+// Serialize passwd/group DB mutations across concurrent helper invocations.
+// This does not replace shadow-utils internal locks, but prevents the daemon
+// from creating its own contention storms when multiple admin calls race.
+static int acquire_passwddb_serial_lock(int* out_fd) {
+    if (out_fd) *out_fd = -1;
+    char lock_path[256];
+    snprintf(lock_path, sizeof(lock_path), "%s/passwd_db.serial.lock", MCP_STATE_DIR);
+    int fd = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "open %s: %s\n", lock_path, strerror(errno));
+        return -1;
+    }
+
+    // Wait up to ~30s for our own serialization lock.
+    for (int attempt = 0; attempt < 60; ++attempt) {
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+            if (out_fd) *out_fd = fd;
+            return 0;
+        }
+        if (errno != EWOULDBLOCK) break;
+        sleep_ms(500);
+    }
+
+    fprintf(stderr, "timeout acquiring %s\n", lock_path);
+    close(fd);
+    return -1;
+}
+
+static void release_passwddb_serial_lock(int fd) {
+    if (fd >= 0) {
+        (void)flock(fd, LOCK_UN);
+        close(fd);
+    }
+}
+
 static int cmd_useradd(int argc, char** argv) {
     if (argc != 1 || !valid_shortid(argv[0])) {
         fprintf(stderr, "usage: mcp_bridge-priv useradd <shortid>\n");
@@ -113,10 +289,46 @@ static int cmd_useradd(int argc, char** argv) {
 
     char* a[] = {"useradd", "-r", "-M", "-s", "/usr/sbin/nologin",
                  "-d", home, username, NULL};
-    int rc = run("/usr/sbin/useradd", a);
-    if (rc == 0) return 0;
-    if (rc == 9) return 14;   // useradd: username already in use
-    fprintf(stderr, "useradd exit=%d\n", rc);
+
+    int serial_fd = -1;
+    if (acquire_passwddb_serial_lock(&serial_fd) != 0) return 11;
+
+    // Retry transient failures caused by passwd DB lock contention.
+    // We classify lock contention either by (a) detecting a held lock using
+    // fcntl, or (b) seeing a known lock error in useradd's stderr.
+    int rc = -1;
+    char err[2048];
+    int backoff_ms = 200;
+    int last_attempt = -1;
+    // Give the system a little more time (e.g. apt/dpkg triggers) before failing.
+    for (int attempt = 0; attempt < 60; ++attempt) {
+        last_attempt = attempt;
+        rc = run_capture_stderr("/usr/sbin/useradd", a, err, sizeof(err));
+        if (rc == 0) return 0;
+        if (rc == 9) return 14;   // useradd: username already in use
+        // Match common shadow-utils messages (English) and any "cannot lock" variant.
+        int msg_looks_like_lock =
+            (strstr(err, "cannot lock") != NULL) ||
+            (strstr(err, "try again later") != NULL);
+        int looks_like_lock =
+            (rc == 1) && (passwd_db_locked() || msg_looks_like_lock);
+        if (looks_like_lock) {
+            if (attempt == 0) {
+                fprintf(stderr,
+                        "useradd: passwd db busy, retrying (up to 60 attempts)\n");
+            }
+            sleep_ms(backoff_ms);
+            if (backoff_ms < 2000) backoff_ms *= 2;
+            continue;
+        }
+        break;
+    }
+
+    pid_t holder = passwd_db_lock_holder();
+    fprintf(stderr,
+            "useradd failed after %d attempt(s) exit=%d lock_holder_pid=%ld output=%s\n",
+            last_attempt + 1, rc, (long)holder, err);
+    release_passwddb_serial_lock(serial_fd);
     return 11;
 }
 
@@ -129,7 +341,11 @@ static int cmd_userdel(int argc, char** argv) {
     snprintf(username, sizeof(username), "mcp_user_%s", argv[0]);
 
     char* a[] = {"userdel", "-r", username, NULL};
+
+    int serial_fd = -1;
+    if (acquire_passwddb_serial_lock(&serial_fd) != 0) return 11;
     int rc = run("/usr/sbin/userdel", a);
+    release_passwddb_serial_lock(serial_fd);
     if (rc == 0 || rc == 6) return 0;  // 6 = user does not exist (idempotent)
     fprintf(stderr, "userdel exit=%d\n", rc);
     return 11;
@@ -420,6 +636,122 @@ static int cmd_cleanup_user_state(int argc, char** argv) {
     return 11;
 }
 
+static int b64_val(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return (int)(c - 'A');
+    if (c >= 'a' && c <= 'z') return (int)(c - 'a') + 26;
+    if (c >= '0' && c <= '9') return (int)(c - '0') + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+// Decode standard base64 into dst. Returns number of bytes written or -1.
+static ssize_t base64_decode(const char* in, unsigned char* dst, size_t dst_sz) {
+    if (!in || !dst) return -1;
+    size_t out = 0;
+    int quad[4];
+    int q = 0;
+    for (const unsigned char* p = (const unsigned char*)in; *p; ++p) {
+        unsigned char c = *p;
+        if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
+        if (c == '=') {
+            quad[q++] = -2; // padding
+        } else {
+            int v = b64_val(c);
+            if (v < 0) return -1;
+            quad[q++] = v;
+        }
+        if (q == 4) {
+            if (quad[0] < 0 || quad[1] < 0) return -1;
+            unsigned b0 = ((unsigned)quad[0] << 2) | ((unsigned)quad[1] >> 4);
+            if (out + 1 > dst_sz) return -1;
+            dst[out++] = (unsigned char)b0;
+            if (quad[2] == -2) { q = 0; break; }
+            if (quad[2] < 0) return -1;
+            unsigned b1 = (((unsigned)quad[1] & 0x0f) << 4) | ((unsigned)quad[2] >> 2);
+            if (out + 1 > dst_sz) return -1;
+            dst[out++] = (unsigned char)b1;
+            if (quad[3] == -2) { q = 0; break; }
+            if (quad[3] < 0) return -1;
+            unsigned b2 = (((unsigned)quad[2] & 0x03) << 6) | (unsigned)quad[3];
+            if (out + 1 > dst_sz) return -1;
+            dst[out++] = (unsigned char)b2;
+            q = 0;
+        }
+    }
+    if (q != 0) return -1; // incomplete quartet
+    return (ssize_t)out;
+}
+
+static int cmd_write_runtime(int argc, char** argv) {
+    if (argc != 2 || !valid_shortid(argv[0]) || !argv[1] || argv[1][0] == '\0') {
+        fprintf(stderr, "usage: mcp_bridge-priv write-runtime <shortid> <base64>\n");
+        return 10;
+    }
+    char username[32];
+    snprintf(username, sizeof(username), "mcp_user_%s", argv[0]);
+
+    // Resolve target uid/gid via getpwnam_r.
+    char buf[1024];
+    struct passwd pw;
+    struct passwd* result = NULL;
+    int rc = getpwnam_r(username, &pw, buf, sizeof(buf), &result);
+    if (rc != 0 || !result) {
+        fprintf(stderr, "getpwnam_r %s: %s\n", username,
+                rc != 0 ? strerror(rc) : "not found");
+        return 12;
+    }
+    uid_t uid = pw.pw_uid;
+    gid_t gid = pw.pw_gid;
+
+    // Ensure user state dirs exist and are owned by the target user.
+    char user_dir[256];
+    snprintf(user_dir, sizeof(user_dir), "%s/%s", MCP_USERS_STATE_DIR, username);
+    if (ensure_owned_dir(user_dir, uid, gid, 0700) != 0) return 11;
+
+    char runtime_path[512], tmp_path[512];
+    snprintf(runtime_path, sizeof(runtime_path), "%s/runtime.json", user_dir);
+    snprintf(tmp_path, sizeof(tmp_path), "%s/runtime.json.tmp", user_dir);
+
+    unsigned char decoded[4096];
+    ssize_t n = base64_decode(argv[1], decoded, sizeof(decoded));
+    if (n < 0) {
+        fprintf(stderr, "base64 decode failed\n");
+        return 11;
+    }
+
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "open %s: %s\n", tmp_path, strerror(errno));
+        return 11;
+    }
+    ssize_t off = 0;
+    while (off < n) {
+        ssize_t w = write(fd, decoded + off, (size_t)(n - off));
+        if (w < 0) { close(fd); unlink(tmp_path); return 11; }
+        off += w;
+    }
+    if (fsync(fd) != 0) { close(fd); unlink(tmp_path); return 11; }
+    close(fd);
+
+    if (chown(tmp_path, uid, gid) != 0) {
+        unlink(tmp_path);
+        fprintf(stderr, "chown %s: %s\n", tmp_path, strerror(errno));
+        return 11;
+    }
+    if (chmod(tmp_path, 0600) != 0) {
+        unlink(tmp_path);
+        fprintf(stderr, "chmod %s: %s\n", tmp_path, strerror(errno));
+        return 11;
+    }
+    if (rename(tmp_path, runtime_path) != 0) {
+        unlink(tmp_path);
+        fprintf(stderr, "rename %s -> %s: %s\n", tmp_path, runtime_path, strerror(errno));
+        return 11;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     // Strip inherited environment; rebuild a minimal one for our own children.
     static char path_env[] = "PATH=/usr/sbin:/usr/bin:/sbin:/bin";
@@ -442,6 +774,7 @@ int main(int argc, char** argv) {
     if (strcmp(argv[1], "revoke-system-admin") == 0)  return cmd_revoke_system_admin(argc - 2, argv + 2);
     if (strcmp(argv[1], "prepare-user-state") == 0)   return cmd_prepare_user_state(argc - 2, argv + 2);
     if (strcmp(argv[1], "cleanup-user-state") == 0)   return cmd_cleanup_user_state(argc - 2, argv + 2);
+    if (strcmp(argv[1], "write-runtime") == 0)        return cmd_write_runtime(argc - 2, argv + 2);
 
     fprintf(stderr, "unknown subcommand: %s\n", argv[1]);
     return 10;
