@@ -2,11 +2,49 @@
 #include <sstream>
 #include <filesystem>
 #include <fstream>
+#include <string>
+
+namespace {
+
+// The bridge daemon often runs under systemd with AmbientCapabilities=CAP_SETUID
+// CAP_SETGID so it can drop privileges in run_process_as(). Bubblewrap started
+// from that process inherits those ambient bits; when bwrap is not setuid root
+// it aborts with "Unexpected capabilities but not setuid".
+bool process_has_ambient_capabilities() {
+    std::ifstream f("/proc/self/status");
+    if (!f) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("CapAmb:", 0) != 0) continue;
+        std::string hex;
+        for (size_t i = 7; i < line.size(); ++i) {
+            char c = line[i];
+            if (c == ' ' || c == '\t') continue;
+            if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+                hex.push_back(c);
+            }
+        }
+        if (hex.empty()) return false;
+        unsigned long long v = 0;
+        try {
+            v = std::stoull(hex, nullptr, 16);
+        } catch (...) {
+            return false;
+        }
+        return v != 0;
+    }
+    return false;
+}
+
+} // namespace
 
 SandboxCapabilities get_sandbox_capabilities() {
     SandboxCapabilities caps;
     caps.namespaces = (run_process("unshare --help 2>&1").exit_code == 0);
     caps.bubblewrap = (run_process("which bwrap 2>/dev/null").exit_code == 0);
+    if (caps.bubblewrap && process_has_ambient_capabilities()) {
+        caps.bubblewrap = false;
+    }
     caps.cgroups = std::filesystem::exists("/sys/fs/cgroup/cgroup.controllers");
     caps.seccomp = std::filesystem::exists("/proc/sys/kernel/seccomp");
     return caps;
