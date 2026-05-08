@@ -766,6 +766,22 @@ int main(int argc, char** argv) {
         return 10;
     }
 
+    // The setuid bit (mode 4750 root:mcp) gives us euid=0 but leaves the
+    // real uid as the daemon's (`mcp`). Shadow-utils (useradd/usermod/...)
+    // check getuid()==0 and exit with "Permission denied" otherwise, which
+    // surfaces as a "cannot lock /etc/passwd" retry loop. Promote real and
+    // saved uid to 0 so exec'd children inherit a real uid of 0.
+    if (geteuid() != 0) {
+        fprintf(stderr,
+                "mcp_bridge-priv: not effective-root (missing setuid bit? "
+                "expected mode 4750 root:mcp; got euid=%d)\n", geteuid());
+        return 11;
+    }
+    if (setuid(0) != 0) {
+        fprintf(stderr, "setuid(0): %s\n", strerror(errno));
+        return 11;
+    }
+
     if (strcmp(argv[1], "useradd") == 0)              return cmd_useradd(argc - 2, argv + 2);
     if (strcmp(argv[1], "userdel") == 0)              return cmd_userdel(argc - 2, argv + 2);
     if (strcmp(argv[1], "install-grant") == 0)        return cmd_install_grant(argc - 2, argv + 2);
